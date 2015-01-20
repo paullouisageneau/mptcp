@@ -283,7 +283,11 @@ static struct sk_buff *__mptcp_next_segment(struct sock *meta_sk, int *reinject)
 	if (skb) {
 		*reinject = 1;
 	} else {
-		skb = tcp_send_head(meta_sk);
+		/* MPTCP-RLC */
+		if(mpcb->rlc_enabled)
+			skb = mptcp_rlc_combine_skb(meta_sk);
+		else
+			skb = tcp_send_head(meta_sk);
 
 		if (!skb && meta_sk->sk_socket &&
 		    test_bit(SOCK_NOSPACE, &meta_sk->sk_socket->flags) &&

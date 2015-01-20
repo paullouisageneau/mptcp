@@ -132,7 +132,10 @@ struct mptcp_options_received {
 		more_rem_addr:1, /* Saw one more rem-addr. */
 
 		mp_fail:1,
-		mp_fclose:1;
+		mp_fclose:1,
+
+		rlc_enabled:1;	/* MPTCP-RLC: activation flag */
+
 	u8	rem_id;		/* Address-id in the MP_JOIN */
 	u8	prio_addr_id;	/* Address-id in the MP_PRIO */
 
@@ -170,6 +173,7 @@ struct mptcp_tcp_sock {
 		send_mp_fail:1,
 		include_mpc:1,
 		mapping_present:1,
+		mapping_rlc:1,		/* MPTCP-RLC */
 		map_data_fin:1,
 		low_prio:1, /* use this socket as backup */
 		rcv_low_prio:1, /* Peer sent low-prio option to us */
@@ -283,7 +287,8 @@ struct mptcp_cb {
 		dfin_combined:1,   /* Was the DFIN combined with subflow-fin? */
 		passive_close:1,
 		snd_hiseq_index:1, /* Index in snd_high_order of snd_nxt */
-		rcv_hiseq_index:1; /* Index in rcv_high_order of rcv_nxt */
+		rcv_hiseq_index:1, /* Index in rcv_high_order of rcv_nxt */
+		rlc_enabled:1;     /* MPTCP-RLC: activation flag */
 
 	/* socket count in this connection */
 	u8 cnt_subflows;
@@ -338,6 +343,15 @@ struct mptcp_cb {
 
 	/* Timer for retransmitting SYN/ACK+MP_JOIN */
 	struct timer_list synack_timer;
+
+	/* MPTCP-RLC */
+	u32 rlc_first_component;        /* TX: first component number */
+	u32 rlc_next_seen;              /* RX: next seen */
+	u32 rlc_next_decoded;           /* RX: next decoded */
+	u32 rlc_next_dropped;           /* RX: next dropped */
+	u8  rlc_fin_pending:1;		/* RX: FIN is pending */
+        void *rlc_ptr;                  /* RX: RLC state ptr */
+        struct sk_buff_head rlc_queue;	/* RX: incoming queue */
 };
 
 #define MPTCP_SUB_CAPABLE			0
@@ -464,18 +478,17 @@ extern bool mptcp_init_failed;
 #define OPTION_REMOVE_ADDR	(1 << 9)
 #define OPTION_MP_PRIO		(1 << 10)
 
-/* MPTCP flags: both TX and RX */
+/* MPTCP flags (16-bit field) */
 #define MPTCPHDR_SEQ		0x01 /* DSS.M option is present */
 #define MPTCPHDR_FIN		0x02 /* DSS.F option is present */
-#define MPTCPHDR_SEQ64_INDEX	0x04 /* index of seq in mpcb->snd_high_order */
-/* MPTCP flags: RX only */
-#define MPTCPHDR_ACK		0x08
-#define MPTCPHDR_SEQ64_SET	0x10 /* Did we received a 64-bit seq number?  */
-#define MPTCPHDR_SEQ64_OFO	0x20 /* Is it not in our circular array? */
-#define MPTCPHDR_DSS_CSUM	0x40
-#define MPTCPHDR_JOIN		0x80
-/* MPTCP flags: TX only */
-#define MPTCPHDR_INF		0x08
+#define MPTCPHDR_RLC            0x04 /* MPTCP-RLC: DSS.C option is present */
+#define MPTCPHDR_SEQ64_INDEX	0x08 /* index of seq in mpcb->snd_high_order */
+#define MPTCPHDR_ACK		0x10
+#define MPTCPHDR_SEQ64_SET	0x20 /* Did we received a 64-bit seq number?  */
+#define MPTCPHDR_SEQ64_OFO	0x40 /* Is it not in our circular array? */
+#define MPTCPHDR_DSS_CSUM	0x80
+#define MPTCPHDR_JOIN		0x0100
+#define MPTCPHDR_INF		0x0200
 
 struct mptcp_option {
 	__u8	kind;
@@ -556,11 +569,13 @@ struct mp_dss {
 		M:1,
 		m:1,
 		F:1,
-		rsv2:3;
+		C:1,	/* MPTCP-RLC: activation flag */
+		rsv2:2;
 #elif defined(__BIG_ENDIAN_BITFIELD)
 	__u16	sub:4,
 		rsv1:4,
-		rsv2:3,
+		rsv2:2,
+		C:1,	/* MPTCP-RLC: activation flag */
 		F:1,
 		m:1,
 		M:1,
@@ -846,6 +861,12 @@ void mptcp_join_reqsk_init(struct mptcp_cb *mpcb, struct request_sock *req,
 void mptcp_reqsk_init(struct request_sock *req, struct sk_buff *skb);
 int mptcp_conn_request(struct sock *sk, struct sk_buff *skb);
 
+/* MPTCP-RLC */
+struct sk_buff *mptcp_rlc_combine_skb(struct sock *meta_sk);
+void mptcp_rlc_push_skb(struct sock *meta_sk, struct sk_buff *skb);
+void mptcp_rlc_solve_pending(struct sock *meta_sk);
+struct sk_buff *mptcp_rlc_pull_skb(struct sock *meta_sk);
+
 /* MPTCP-path-manager registration/initialization functions */
 int mptcp_register_path_manager(struct mptcp_pm_ops *pm);
 void mptcp_unregister_path_manager(struct mptcp_pm_ops *pm);
@@ -926,8 +947,9 @@ static inline void mptcp_push_pending_frames(struct sock *meta_sk)
 	/* We check packets out and send-head here. TCP only checks the
 	 * send-head. But, MPTCP also checks packets_out, as this is an
 	 * indication that we might want to do opportunistic reinjection.
+	 * MPTCP-RLC: always push
 	 */
-	if (tcp_sk(meta_sk)->packets_out || tcp_send_head(meta_sk)) {
+	if (tcp_sk(meta_sk)->mpcb->rlc_enabled || tcp_sk(meta_sk)->packets_out || tcp_send_head(meta_sk)) {
 		struct tcp_sock *tp = tcp_sk(meta_sk);
 
 		/* We don't care about the MSS, because it will be set in
@@ -945,12 +967,12 @@ static inline void mptcp_send_reset(struct sock *sk)
 
 static inline bool mptcp_is_data_seq(const struct sk_buff *skb)
 {
-	return TCP_SKB_CB(skb)->mptcp_flags & MPTCPHDR_SEQ;
+	return (TCP_SKB_CB(skb)->mptcp_flags & MPTCPHDR_SEQ) ? true : false;
 }
 
 static inline bool mptcp_is_data_fin(const struct sk_buff *skb)
 {
-	return TCP_SKB_CB(skb)->mptcp_flags & MPTCPHDR_FIN;
+	return (TCP_SKB_CB(skb)->mptcp_flags & MPTCPHDR_FIN) ? true : false;
 }
 
 /* Is it a data-fin while in infinite mapping mode?
@@ -961,6 +983,22 @@ static inline bool mptcp_is_data_fin2(const struct sk_buff *skb,
 {
 	return mptcp_is_data_fin(skb) ||
 	       (tp->mpcb->infinite_mapping_rcv && tcp_hdr(skb)->fin);
+}
+
+/* MPTCP-RLC */
+static inline bool mptcp_is_rlc(const struct sk_buff *skb)
+{
+       return mptcp_is_data_seq(skb) && (TCP_SKB_CB(skb)->mptcp_flags & MPTCPHDR_RLC) != 0;
+}
+
+static inline u64 mptcp_get_data_seq(const struct sk_buff *skb)
+{
+       __u32 *ptr = (__u32 *)(skb_transport_header(skb) + TCP_SKB_CB(skb)->dss_off);
+
+       if (TCP_SKB_CB(skb)->mptcp_flags & MPTCPHDR_SEQ64_SET)
+               return get_unaligned_be64(ptr);
+       else
+               return (u64)get_unaligned_be32(ptr);
 }
 
 static inline u8 mptcp_get_64_bit(u64 data_seq, struct mptcp_cb *mpcb)
@@ -1067,6 +1105,8 @@ static inline void mptcp_init_mp_opt(struct mptcp_options_received *mopt)
 
 	mopt->mp_fail = 0;
 	mopt->mp_fclose = 0;
+
+	mopt->rlc_enabled = 0;
 }
 
 static inline void mptcp_reset_mopt(struct tcp_sock *tp)
@@ -1228,6 +1268,10 @@ static inline bool mptcp_fallback_infinite(struct sock *sk, int flag)
 		return false;
 
 	if (!(flag & MPTCP_FLAG_DATA_ACKED))
+		return false;
+
+	 /* MPTCP-RLC: TODO: For now, prevent fallback if RLC is enabled */
+	if(tp->mpcb->rlc_enabled)
 		return false;
 
 	/* Don't fallback twice ;) */

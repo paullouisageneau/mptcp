@@ -239,9 +239,14 @@ void mptcp_reinject_data(struct sock *sk, int clone_it)
 	struct sk_buff *skb_it, *tmp;
 	struct tcp_sock *tp = tcp_sk(sk);
 	struct sock *meta_sk = tp->meta_sk;
+	struct tcp_sock *meta_tp = tcp_sk(meta_sk);
 
 	/* It has already been closed - there is really no point in reinjecting */
 	if (meta_sk->sk_state == TCP_CLOSE)
+		return;
+
+	/* MPTCP-RLC: If RLC is enabled, there is no point in reinjecting */
+	if (meta_tp->mpcb->rlc_enabled)
 		return;
 
 	skb_queue_walk_safe(&sk->sk_write_queue, skb_it, tmp) {
@@ -322,7 +327,14 @@ static int mptcp_write_dss_mapping(struct tcp_sock *tp, struct sk_buff *skb,
 	__be32 *start = ptr;
 	__u16 data_len;
 
-	*ptr++ = htonl(tcb->seq); /* data_seq */
+	/* MPTCP-RLC */
+	if(tp->mpcb->rlc_enabled) {
+		*ptr++ = htonl((__u32)(tcb->mptcp_rlc_seq >> 32));      /* hi order */
+		*ptr++ = htonl((__u32)tcb->mptcp_rlc_seq);              /* low order */
+	}
+	else {
+		*ptr++ = htonl(tcb->seq); /* data_seq */
+	}
 
 	/* If it's a non-data DATA_FIN, we set subseq to 0 (draft v7) */
 	if (mptcp_is_data_fin(skb) && skb->len == 0)
@@ -365,15 +377,20 @@ static int mptcp_write_dss_data_ack(struct tcp_sock *tp, struct sk_buff *skb,
 	mdss->sub = MPTCP_SUB_DSS;
 	mdss->rsv1 = 0;
 	mdss->rsv2 = 0;
+	mdss->C = tp->mpcb->rlc_enabled ? 1 : 0;		/* MPTCP-RLC */
 	mdss->F = mptcp_is_data_fin(skb) ? 1 : 0;
-	mdss->m = 0;
 	mdss->M = mptcp_is_data_seq(skb) ? 1 : 0;
-	mdss->a = 0;
+	mdss->m = (mdss->M && tp->mpcb->rlc_enabled) ? 1 : 0;   /* MPTCP-RLC */
 	mdss->A = 1;
+	mdss->a = 0;
 	mdss->len = mptcp_sub_len_dss(mdss, tp->mpcb->dss_csum);
-	ptr++;
+	ptr++; /* struct mp_dss is 32-bit long */
 
-	*ptr++ = htonl(mptcp_meta_tp(tp)->rcv_nxt);
+	/* MPTCP-RLC: ACK field contains next seen if RLC enabled */
+	if(tp->mpcb->rlc_enabled)
+		*ptr++ = htonl(tp->mpcb->rlc_next_seen);
+	else
+		*ptr++ = htonl(mptcp_meta_tp(tp)->rcv_nxt);
 
 	return ptr - start;
 }
@@ -398,6 +415,7 @@ static void mptcp_save_dss_data_seq(struct tcp_sock *tp, struct sk_buff *skb)
 
 	tcb->mptcp_flags |= MPTCPHDR_SEQ;
 
+	/* WARNING: tcb-dss must be big enough */
 	ptr += mptcp_write_dss_data_ack(tp, skb, ptr);
 	ptr += mptcp_write_dss_mapping(tp, skb, ptr);
 }
@@ -406,19 +424,27 @@ static void mptcp_save_dss_data_seq(struct tcp_sock *tp, struct sk_buff *skb)
 static int mptcp_write_dss_data_seq(struct tcp_sock *tp, struct sk_buff *skb,
 				     __be32 *ptr)
 {
+	struct mp_dss *mdss = (struct mp_dss *)TCP_SKB_CB(skb)->dss;
 	__be32 *start = ptr;
 
-	memcpy(ptr, TCP_SKB_CB(skb)->dss, mptcp_dss_len);
+	/* MPTCP-RLC: m flag support */
+	int len = mptcp_dss_len;
+	if(mdss->m) len+= 4;
+	memcpy(ptr, TCP_SKB_CB(skb)->dss, len);
 
 	/* update the data_ack */
-	start[1] = htonl(mptcp_meta_tp(tp)->rcv_nxt);
+	/* MPTCP-RLC: ack field contains next seen if RLC enabled */
+	if(tp->mpcb->rlc_enabled)
+		start[1] = htonl(tp->mpcb->rlc_next_seen);
+	else
+		start[1] = htonl(mptcp_meta_tp(tp)->rcv_nxt);
 
 	/* dss is in a union with inet_skb_parm and
 	 * the IP layer expects zeroed IPCB fields.
 	 */
-	memset(TCP_SKB_CB(skb)->dss, 0 , mptcp_dss_len);
+	memset(TCP_SKB_CB(skb)->dss, 0 , len);
 
-	return mptcp_dss_len/sizeof(*ptr);
+	return len/sizeof(*ptr);
 }
 
 static bool mptcp_skb_entail(struct sock *sk, struct sk_buff *skb, int reinject)
@@ -576,15 +602,28 @@ int mptcp_write_wakeup(struct sock *meta_sk)
 	if (meta_sk->sk_state == TCP_CLOSE)
 		return -1;
 
-	skb = tcp_send_head(meta_sk);
+	/* MPTCP-RLC */
+	if(tcp_sk(meta_sk)->mpcb->rlc_enabled)
+		skb = mptcp_rlc_combine_skb(meta_sk);
+	else {
+		skb = tcp_send_head(meta_sk);
+	}
+
 	if (skb &&
 	    before(TCP_SKB_CB(skb)->seq, tcp_wnd_end(meta_tp))) {
 		unsigned int mss;
 		unsigned int seg_size = tcp_wnd_end(meta_tp) - TCP_SKB_CB(skb)->seq;
 		struct sock *subsk = meta_tp->mpcb->sched_ops->get_subflow(meta_sk, skb, true);
 		struct tcp_sock *subtp;
-		if (!subsk)
+
+		if (!subsk) {
+			/* MPTCP-RLC: Combinations must be freed */
+			if(mptcp_is_rlc(skb))
+				kfree_skb(skb);
+
 			goto window_probe;
+		}
+
 		subtp = tcp_sk(subsk);
 		mss = tcp_current_mss(subsk);
 
@@ -604,7 +643,7 @@ int mptcp_write_wakeup(struct sock *meta_sk)
 			TCP_SKB_CB(skb)->tcp_flags |= TCPHDR_PSH;
 			if (mptcp_fragment(meta_sk, skb, seg_size,
 					   GFP_ATOMIC, 0))
-				return -1;
+				goto failure;
 		} else if (!tcp_skb_pcount(skb)) {
 			/* see mptcp_write_xmit on why we use UINT_MAX */
 			tcp_set_skb_tso_segs(meta_sk, skb, UINT_MAX);
@@ -612,16 +651,28 @@ int mptcp_write_wakeup(struct sock *meta_sk)
 
 		TCP_SKB_CB(skb)->tcp_flags |= TCPHDR_PSH;
 		if (!mptcp_skb_entail(subsk, skb, 0))
-			return -1;
+			goto failure;
 		TCP_SKB_CB(skb)->when = tcp_time_stamp;
 
 		mptcp_check_sndseq_wrap(meta_tp, TCP_SKB_CB(skb)->end_seq -
 						 TCP_SKB_CB(skb)->seq);
-		tcp_event_new_data_sent(meta_sk, skb);
+
+		/* MPTCP-RLC */
+		if(!mptcp_is_rlc(skb))
+			tcp_event_new_data_sent(meta_sk, skb);
+		else
+			 kfree_skb(skb);
 
 		__tcp_push_pending_frames(subsk, mss, TCP_NAGLE_PUSH);
 
 		return 0;
+
+failure:
+		/* MPTCP-RLC: Combinations must be freed */
+		if(mptcp_is_rlc(skb))
+		        kfree_skb(skb);
+
+		return -1;
 	} else {
 window_probe:
 		if (between(meta_tp->snd_up, meta_tp->snd_una + 1,
@@ -745,7 +796,10 @@ bool mptcp_write_xmit(struct sock *meta_sk, unsigned int mss_now, int nonagle,
 			mptcp_check_sndseq_wrap(meta_tp,
 						TCP_SKB_CB(skb)->end_seq -
 						TCP_SKB_CB(skb)->seq);
-			tcp_event_new_data_sent(meta_sk, skb);
+
+			/* MPTCP-RLC */
+			if(!mptcp_is_rlc(skb))
+				tcp_event_new_data_sent(meta_sk, skb);
 		}
 
 		tcp_minshall_update(meta_tp, mss_now, skb);
@@ -753,12 +807,21 @@ bool mptcp_write_xmit(struct sock *meta_sk, unsigned int mss_now, int nonagle,
 
 		if (reinject > 0) {
 			__skb_unlink(skb, &mpcb->reinject_queue);
-			kfree_skb(skb);
+			__kfree_skb(skb);
+			skb = NULL;
 		}
 
 		if (push_one)
 			break;
+
+		/* MPTCP-RLC: Combinations must be freed */
+		if(skb && mptcp_is_rlc(skb))
+			__kfree_skb(skb);
 	}
+
+	/* MPTCP-RLC: Combinations must be freed */
+	if(skb && mptcp_is_rlc(skb))
+		__kfree_skb(skb);
 
 	return !meta_tp->packets_out && tcp_send_head(meta_sk);
 }
@@ -968,6 +1031,10 @@ void mptcp_established_options(struct sock *sk, struct sk_buff *skb,
 			 */
 			*size += MPTCP_SUB_LEN_ACK_ALIGN +
 				 MPTCP_SUB_LEN_SEQ_ALIGN;
+
+			/* MPTCP-RLC */
+			if(mpcb->rlc_enabled)
+				*size+= 4; /* seq is always 64-bits in RLC mode */
 		}
 
 		*size += MPTCP_SUB_LEN_DSS_ALIGN;
@@ -1560,7 +1627,14 @@ unsigned int mptcp_current_mss(struct sock *meta_sk)
 	/* If no subflow is available, we take a default-mss from the
 	 * meta-socket.
 	 */
-	return !mss ? tcp_current_mss(meta_sk) : mss;
+	if(!mss)
+		mss = tcp_current_mss(meta_sk);
+
+	/* MPTCP-RLC: space for 1-byte padding is needed */
+	if(tcp_sk(meta_sk)->mpcb->rlc_enabled)
+		mss-= 1;
+
+	return mss;
 }
 
 int mptcp_select_size(const struct sock *meta_sk, bool sg)

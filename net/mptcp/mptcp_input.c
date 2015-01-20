@@ -34,6 +34,7 @@
 #include <net/mptcp_v6.h>
 
 #include <linux/kconfig.h>
+#include <linux/kthread.h>
 
 /* is seq1 < seq2 ? */
 static inline bool before64(const u64 seq1, const u64 seq2)
@@ -124,6 +125,9 @@ static void mptcp_clean_rtx_queue(struct sock *meta_sk, u32 prior_snd_una)
 			break;
 
 		tcp_unlink_write_queue(skb, meta_sk);
+
+		/* MPTCP-RLC */
+		meta_tp->mpcb->rlc_first_component++;
 
 		if (mptcp_is_data_fin(skb)) {
 			struct sock *sk_it;
@@ -561,8 +565,9 @@ static int mptcp_prevalidate_skb(struct sock *sk, struct sk_buff *skb)
 	/* Receiver-side becomes fully established when a whole rcv-window has
 	 * been received without the need to fallback due to the previous
 	 * condition.
+	 * MPTCP-RLC: Receiver-side becomes fully established on first combination
 	 */
-	if (!tp->mptcp->fully_established) {
+	if (!tp->mptcp->fully_established || mptcp_is_rlc(skb)) {
 		tp->mptcp->init_rcv_wnd -= skb->len;
 		if (tp->mptcp->init_rcv_wnd < 0)
 			mptcp_become_fully_estab(sk);
@@ -727,25 +732,35 @@ static int mptcp_detect_mapping(struct sock *sk, struct sk_buff *skb)
 		return 1;
 	}
 
-	/* Does the DSS had 64-bit seqnum's ? */
-	if (!(tcb->mptcp_flags & MPTCPHDR_SEQ64_SET)) {
-		/* Wrapped around? */
-		if (unlikely(after(data_seq, meta_tp->rcv_nxt) && data_seq < meta_tp->rcv_nxt)) {
-			tp->mptcp->map_data_seq = mptcp_get_data_seq_64(mpcb, !mpcb->rcv_hiseq_index, data_seq);
+	/* MPTCP-RLC */
+	if(tcb->mptcp_flags & MPTCPHDR_RLC) {
+		/* The mapping is RLC, map_data_seq has no meaning here */
+		tp->mptcp->map_data_seq = 0;
+		tp->mptcp->mapping_rlc = 1;
+	}
+	else {
+		/* Does the DSS had 64-bit seqnum's ? */
+		if (!(tcb->mptcp_flags & MPTCPHDR_SEQ64_SET)) {
+			/* Wrapped around? */
+			if (unlikely(after(data_seq, meta_tp->rcv_nxt) && data_seq < meta_tp->rcv_nxt)) {
+				tp->mptcp->map_data_seq = mptcp_get_data_seq_64(mpcb, !mpcb->rcv_hiseq_index, data_seq);
+			} else {
+				/* Else, access the default high-order bits */
+				tp->mptcp->map_data_seq = mptcp_get_data_seq_64(mpcb, mpcb->rcv_hiseq_index, data_seq);
+			}
 		} else {
-			/* Else, access the default high-order bits */
-			tp->mptcp->map_data_seq = mptcp_get_data_seq_64(mpcb, mpcb->rcv_hiseq_index, data_seq);
-		}
-	} else {
-		tp->mptcp->map_data_seq = mptcp_get_data_seq_64(mpcb, (tcb->mptcp_flags & MPTCPHDR_SEQ64_INDEX) ? 1 : 0, data_seq);
+			tp->mptcp->map_data_seq = mptcp_get_data_seq_64(mpcb, (tcb->mptcp_flags & MPTCPHDR_SEQ64_INDEX) ? 1 : 0, data_seq);
 
-		if (unlikely(tcb->mptcp_flags & MPTCPHDR_SEQ64_OFO)) {
-			/* We make sure that the data_seq is invalid.
-			 * It will be dropped later.
-			 */
-			tp->mptcp->map_data_seq += 0xFFFFFFFF;
-			tp->mptcp->map_data_seq += 0xFFFFFFFF;
+			if (unlikely(tcb->mptcp_flags & MPTCPHDR_SEQ64_OFO)) {
+				/* We make sure that the data_seq is invalid.
+				* It will be dropped later.
+				*/
+				tp->mptcp->map_data_seq += 0xFFFFFFFF;
+				tp->mptcp->map_data_seq += 0xFFFFFFFF;
+			}
 		}
+
+		tp->mptcp->mapping_rlc = 0;
 	}
 
 	tp->mptcp->map_data_len = data_len;
@@ -852,27 +867,30 @@ static int mptcp_queue_skb(struct sock *sk)
 	    before(tp->rcv_nxt, tp->mptcp->map_subseq + tp->mptcp->map_data_len))
 		return 0;
 
-	/* Is this an overlapping mapping? rcv_nxt >= end_data_seq
-	 * OR
-	 * This mapping is out of window
-	 */
-	if (!before64(rcv_nxt64, tp->mptcp->map_data_seq + tp->mptcp->map_data_len + tp->mptcp->map_data_fin) ||
-	    !mptcp_sequence(meta_tp, tp->mptcp->map_data_seq,
-			    tp->mptcp->map_data_seq + tp->mptcp->map_data_len + tp->mptcp->map_data_fin)) {
-		skb_queue_walk_safe(&sk->sk_receive_queue, tmp1, tmp) {
-			__skb_unlink(tmp1, &sk->sk_receive_queue);
-			tp->copied_seq = TCP_SKB_CB(tmp1)->end_seq;
-			__kfree_skb(tmp1);
+	/* MPTCP-RLC: Overlapping does not make sense in the mapping is RLC */
+	if(!tp->mptcp->mapping_rlc) {
+		/* Is this an overlapping mapping? rcv_nxt >= end_data_seq
+		* OR
+		* This mapping is out of window
+		*/
+		if (!before64(rcv_nxt64, tp->mptcp->map_data_seq + tp->mptcp->map_data_len + tp->mptcp->map_data_fin) ||
+		    !mptcp_sequence(meta_tp, tp->mptcp->map_data_seq,
+				    tp->mptcp->map_data_seq + tp->mptcp->map_data_len + tp->mptcp->map_data_fin)) {
+			skb_queue_walk_safe(&sk->sk_receive_queue, tmp1, tmp) {
+				__skb_unlink(tmp1, &sk->sk_receive_queue);
+				tp->copied_seq = TCP_SKB_CB(tmp1)->end_seq;
+				__kfree_skb(tmp1);
 
-			if (!skb_queue_empty(&sk->sk_receive_queue) &&
-			    !before(TCP_SKB_CB(tmp)->seq,
-				    tp->mptcp->map_subseq + tp->mptcp->map_data_len))
-				break;
+				if (!skb_queue_empty(&sk->sk_receive_queue) &&
+				    !before(TCP_SKB_CB(tmp)->seq,
+					    tp->mptcp->map_subseq + tp->mptcp->map_data_len))
+					break;
+			}
+
+			mptcp_reset_mapping(tp);
+
+			return -1;
 		}
-
-		mptcp_reset_mapping(tp);
-
-		return -1;
 	}
 
 	/* Record it, because we want to send our data_fin on the same path */
@@ -882,16 +900,86 @@ static int mptcp_queue_skb(struct sock *sk)
 	}
 
 	/* Verify the checksum */
-	if (mpcb->dss_csum && !mpcb->infinite_mapping_rcv) {
+	/* MPTCP-RLC: TODO: disabled checksum */
+	/*if (!mpcb->dss_csum && !mpcb->infinite_mapping_rcv) {
 		int ret = mptcp_verif_dss_csum(sk);
 
 		if (ret <= 0) {
 			mptcp_reset_mapping(tp);
 			return 1;
 		}
-	}
+	}*/
 
-	if (before64(rcv_nxt64, tp->mptcp->map_data_seq)) {
+	/* MPTCP-RLC */
+	if (tp->mptcp->mapping_rlc) {
+		struct sk_buff *skb = NULL;
+
+		/* Walk the queue */
+		bool ignore = (mpcb->in_time_wait != 0);	/* In time-wait, do not receive data */
+		skb_queue_walk_safe(&sk->sk_receive_queue, tmp1, tmp) {
+			tp->copied_seq = TCP_SKB_CB(tmp1)->end_seq;
+			mptcp_prepare_skb(tmp1, tmp, sk);
+			__skb_unlink(tmp1, &sk->sk_receive_queue);
+			skb_orphan(tmp1);
+
+			if (!ignore) {
+				if(!skb) {
+					/* Expand skb if necessary */
+					skb = tmp1;
+					if(skb_tailroom(skb) < tp->mptcp->map_data_len - skb->len) {
+						struct sk_buff *newskb = skb_copy_expand(skb, 0, tp->mptcp->map_data_len - skb->len, GFP_ATOMIC);
+						__kfree_skb(skb);
+						skb = newskb;
+						if(!skb) {
+							printk("mptcp_queue_skb: skb_copy_expand() failed, dropping current mapping\n");
+							ignore = true;
+						}
+					}
+				} else {
+					/* Concatenate tmp1 to skb */
+					memcpy(skb_put(skb, tmp1->len), tmp1->data, tmp1->len);
+					__kfree_skb(tmp1);
+				}
+			} else {
+				__kfree_skb(tmp1);
+			}
+
+			if (!skb_queue_empty(&sk->sk_receive_queue) &&
+			    !before(TCP_SKB_CB(tmp)->seq,
+				    tp->mptcp->map_subseq + tp->mptcp->map_data_len))
+				break;
+		}
+
+		if(skb) {
+			mptcp_rlc_push_skb(meta_sk, skb);
+			mptcp_rlc_solve_pending(meta_sk);
+
+			while((skb = mptcp_rlc_pull_skb(meta_sk)))
+			{
+				int eaten = 0;
+				bool fragstolen = false;
+				u32 old_rcv_nxt = meta_tp->rcv_nxt;
+
+				eaten = tcp_queue_rcv(meta_sk, skb, 0, &fragstolen);
+
+				meta_tp->rcv_nxt = TCP_SKB_CB(skb)->end_seq;
+				mptcp_check_rcvseq_wrap(meta_tp, old_rcv_nxt);
+
+				if (tcp_hdr(skb)->fin && !mpcb->in_time_wait)
+					mptcp_fin(meta_sk);
+
+				/* Check if this fills a gap in the ofo queue */
+				if (!skb_queue_empty(&meta_tp->out_of_order_queue))
+					mptcp_ofo_queue(meta_sk);
+
+				if (eaten)
+					kfree_skb_partial(skb, fragstolen);
+
+				data_queued = true;
+			}
+		}
+	}
+	else if (before64(rcv_nxt64, tp->mptcp->map_data_seq)) {
 		/* Seg's have to go to the meta-ofo-queue */
 		skb_queue_walk_safe(&sk->sk_receive_queue, tmp1, tmp) {
 			tp->copied_seq = TCP_SKB_CB(tmp1)->end_seq;
@@ -1432,6 +1520,32 @@ static void mptcp_data_ack(struct sock *sk, const struct sk_buff *skb)
 		data_seq = meta_tp->snd_wl1;
 	}
 
+	/* MPTCP-RLC */
+	if(mptcp_is_rlc(skb) || true) {
+		struct sk_buff *tmp;
+		u32 next_seen;
+		u32 component;
+
+		/* set data_seq */
+		data_seq = meta_tp->snd_wl1;
+
+		/* data_ack is next seen */
+		next_seen = data_ack;
+		data_ack = prior_snd_una;
+
+		/* compute expected data_ack value expressed in bytes, so we can continue happily */
+		component = meta_tp->mpcb->rlc_first_component;
+		tcp_for_write_queue(tmp, meta_sk) {
+			if(!before(component, next_seen))
+				break;
+			data_ack+= tmp->len;
+			tcp_event_new_data_sent(meta_sk, tmp);	/* called here in RLC mode */
+			++component;
+		}
+
+		/*printk("mptcp_data_ack: next seen %u, first component %u, ack %u\n", next_seen, meta_tp->mpcb->rlc_first_component, data_ack);*/
+	}
+
 	/* If the ack is older than previous acks
 	 * then we can probably ignore it.
 	 */
@@ -1669,6 +1783,19 @@ void mptcp_parse_options(const uint8_t *ptr, int opsize,
 		}
 
 		ptr += 4;
+
+		/* MPTCP-RLC */
+		if (mdss->C) {
+			/* We must have m == 1 (if M == 1) and a == 0 */
+			if((mdss->M && !mdss->m) || mdss->a) {
+				mptcp_debug("%s: mp_dss: incoherent flags for MPTCP-RLC\n", __func__);
+				break;
+			}
+
+			mopt->rlc_enabled = 1;
+			tcb->mptcp_flags |= MPTCPHDR_RLC;
+		}
+
 
 		if (mdss->A) {
 			tcb->mptcp_flags |= MPTCPHDR_ACK;

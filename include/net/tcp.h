@@ -813,7 +813,7 @@ void tcp_send_window_probe(struct sock *sk);
 /* This is what the send packet queuing engine uses to pass
  * TCP per-packet control information to the transmission code.
  * We also store the host-order sequence numbers in here too.
- * This is 44 bytes if IPV6 is enabled.
+ * This is 60 bytes if IPV6 is enabled.
  * If this grows please adjust skbuff.h:skbuff->cb[xxx] size appropriately.
  */
 struct tcp_skb_cb {
@@ -835,9 +835,11 @@ struct tcp_skb_cb {
 	__u32		end_seq;	/* SEQ + FIN + SYN + datalen	*/
 	__u32		when;		/* used to compute rtt's	*/
 #ifdef CONFIG_MPTCP
-	__u8		mptcp_flags;	/* flags for the MPTCP layer    */
+	__u16		mptcp_flags;	/* flags for the MPTCP layer    */
 	__u8		dss_off;	/* Number of 4-byte words until
 					 * seq-number */
+        __u8		mptcp_unused;	/* unused */
+	__u64           mptcp_rlc_seq;  /* MPTCP-RLC: Global sequence number */
 #endif
 	__u8		tcp_flags;	/* TCP header flags. (tcp[13])	*/
 

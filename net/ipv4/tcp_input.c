@@ -5355,7 +5355,8 @@ no_ack:
 	}
 
 slow_path:
-	if (len < (th->doff << 2) || tcp_checksum_complete_user(sk, skb))
+	/* MPTCP-RLC: TODO: disabled checksum */
+	if (len < (th->doff << 2) /*|| tcp_checksum_complete_user(sk, skb)*/)
 		goto csum_error;
 
 	if (!th->ack && !th->rst)

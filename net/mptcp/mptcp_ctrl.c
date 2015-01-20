@@ -1168,6 +1168,16 @@ static int mptcp_alloc_mpcb(struct sock *meta_sk, __u64 remote_key, u32 window)
 	mpcb->orig_sk_sndbuf = meta_sk->sk_sndbuf;
 	mpcb->orig_window_clamp = meta_tp->window_clamp;
 
+	/* MPTCP-RLC */
+	mpcb->rlc_enabled = 1;  /* MPTCP-RLC: TODO */
+	mpcb->rlc_first_component = 0;
+	mpcb->rlc_next_seen = 0;
+	mpcb->rlc_next_decoded = 0;
+	mpcb->rlc_next_dropped = 0;
+	mpcb->rlc_fin_pending = false;
+	mpcb->rlc_ptr = NULL;
+	skb_queue_head_init(&mpcb->rlc_queue);
+
 	/* The meta is directly linked - set refcnt to 1 */
 	atomic_set(&mpcb->mpcb_refcnt, 1);
 

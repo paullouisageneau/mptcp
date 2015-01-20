@@ -55,7 +55,8 @@ static bool mptcp_rr_is_available(struct sock *sk, struct sk_buff *skb,
 			return false;
 	}
 
-	if (!tp->mptcp->fully_established) {
+	/* MPTCP-RLC: ignore in-order test */
+	if (!tp->mptcp->fully_established && !tp->mpcb->rlc_enabled) {
 		/* Make sure that we send in-order data */
 		if (skb && tp->mptcp->second_packet &&
 		    tp->mptcp->last_end_data_seq != TCP_SKB_CB(skb)->seq)
@@ -166,8 +167,14 @@ static struct sk_buff *__mptcp_rr_next_segment(struct sock *meta_sk, int *reinje
 
 	if (skb)
 		*reinject = 1;
-	else
-		skb = tcp_send_head(meta_sk);
+	else {
+		/* MPTCP-RLC */
+		if(mpcb->rlc_enabled)
+			skb = mptcp_rlc_combine_skb(meta_sk);
+		else
+			skb = tcp_send_head(meta_sk);
+	}
+
 	return skb;
 }
 
