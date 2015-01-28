@@ -619,7 +619,7 @@ int mptcp_write_wakeup(struct sock *meta_sk)
 		if (!subsk) {
 			/* MPTCP-RLC: Combinations must be freed */
 			if(mptcp_is_rlc(skb))
-				kfree_skb(skb);
+				dev_kfree_skb_any(skb);
 
 			goto window_probe;
 		}
@@ -661,7 +661,7 @@ int mptcp_write_wakeup(struct sock *meta_sk)
 		if(!mptcp_is_rlc(skb))
 			tcp_event_new_data_sent(meta_sk, skb);
 		else
-			 kfree_skb(skb);
+			dev_kfree_skb_any(skb);
 
 		__tcp_push_pending_frames(subsk, mss, TCP_NAGLE_PUSH);
 
@@ -670,7 +670,7 @@ int mptcp_write_wakeup(struct sock *meta_sk)
 failure:
 		/* MPTCP-RLC: Combinations must be freed */
 		if(mptcp_is_rlc(skb))
-		        kfree_skb(skb);
+		        dev_kfree_skb_any(skb);
 
 		return -1;
 	} else {
@@ -816,12 +816,12 @@ bool mptcp_write_xmit(struct sock *meta_sk, unsigned int mss_now, int nonagle,
 
 		/* MPTCP-RLC: Combinations must be freed */
 		if(skb && mptcp_is_rlc(skb))
-			__kfree_skb(skb);
+			dev_kfree_skb_any(skb);
 	}
 
 	/* MPTCP-RLC: Combinations must be freed */
 	if(skb && mptcp_is_rlc(skb))
-		__kfree_skb(skb);
+		dev_kfree_skb_any(skb);
 
 	return !meta_tp->packets_out && tcp_send_head(meta_sk);
 }

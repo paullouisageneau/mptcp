@@ -352,6 +352,7 @@ struct mptcp_cb {
 	u8  rlc_fin_pending:1;		/* RX: FIN is pending */
         void *rlc_ptr;                  /* RX: RLC state ptr */
         struct sk_buff_head rlc_queue;	/* RX: incoming queue */
+        spinlock_t rlc_lock;		/* RX: decoding lock */
 };
 
 #define MPTCP_SUB_CAPABLE			0

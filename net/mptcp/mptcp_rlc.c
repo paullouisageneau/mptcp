@@ -188,7 +188,7 @@ void mptcp_rlc_combination_free(mptcp_rlc_combination_t *combination)
 		return;
 
 	if(combination->flags & MPTCP_FLAGS_FREE_SKB)
-		kfree_skb(combination->skb);
+		dev_kfree_skb_any(combination->skb);
 
 	kfree(combination->next);
 	kfree(combination);
@@ -376,7 +376,7 @@ bool mptcp_rlc_combination_combine(mptcp_rlc_combination_t *c, uint8_t kc, const
 					if(!newskb)
 						return false;
 
-					kfree_skb(c->skb);
+					dev_kfree_skb_any(c->skb);
 					c->skb = newskb;
 					c->flags|= MPTCP_FLAGS_FREE_SKB;
 				}
@@ -425,7 +425,7 @@ bool mptcp_rlc_combination_combine(mptcp_rlc_combination_t *c, uint8_t kc, const
 				if(!newskb)
 					return false;
 
-				kfree_skb(c->skb);
+				dev_kfree_skb_any(c->skb);
 				c->skb = newskb;
 				c->flags|= MPTCP_FLAGS_FREE_SKB;
 			}
@@ -575,14 +575,14 @@ mptcp_rlc_combination_t *mptcp_rlc_solve_rec(mptcp_rlc_combination_t *list, mptc
 
 			BUG_ON(incoming->next != NULL);
 
-			/*printk("mptcp_rlc_solve: inserting incoming at end (position %u), new pivot for %u\n", i, (unsigned)incoming->first);*/
+			/*printk("mptcp_rlc_solve_rec: inserting incoming at end (position %u), new pivot for %u\n", i, (unsigned)incoming->first);*/
 			return incoming;
 		}
 		else {
 			/* Combination is now null, meaning it was redundant */
 			mptcp_rlc_combination_free(incoming);
 
-			/*printk("mptcp_rlc_solve: incoming is redundant\n");*/
+			/*printk("mptcp_rlc_solve_rec: incoming is redundant\n");*/
 			return NULL;
 		}
 	}
@@ -591,12 +591,18 @@ mptcp_rlc_combination_t *mptcp_rlc_solve_rec(mptcp_rlc_combination_t *list, mptc
 	BUG_ON(list == NULL);
 	BUG_ON(list->count == 0);
 	BUG_ON(list->coeffs[0] != 1);
-	BUG_ON(list->first < i);
+	
+	if(list->first < i)
+	{
+		mptcp_rlc_combination_free(incoming);
+		return list;
+	}
 
 	if(incoming->count != 0 && incoming->first + incoming->count > list->first) {
 		if(list->first == i) {
 			uint8_t c = mptcp_rlc_combination_coeff(incoming, list->first);
 			if(c) {
+				/*printk("mptcp_rlc_solve_rec: eliminating component %u in incoming\n", (unsigned)i);*/
 				if(!mptcp_rlc_combination_combine(incoming, 1, list, c)) {
 					mptcp_rlc_combination_free(incoming);
 					return list;
@@ -619,7 +625,7 @@ mptcp_rlc_combination_t *mptcp_rlc_solve_rec(mptcp_rlc_combination_t *list, mptc
 				BUG_ON(incoming->next != NULL);
 				incoming->next = list;
 
-				/*printk("mptcp_rlc_solve: inserting incoming at position %u, new pivot for %u\n", i, i);*/
+				/*printk("mptcp_rlc_solve_rec: inserting incoming at position %u, new pivot for %u\n", (unsigned)i, (unsigned)i);*/
 				return incoming;
 			}
 		}
@@ -632,7 +638,7 @@ mptcp_rlc_combination_t *mptcp_rlc_solve_rec(mptcp_rlc_combination_t *list, mptc
 			while(l && l->count == 1 && l->first < list->first + list->count) {
 				uint8_t c = mptcp_rlc_combination_coeff(list, l->first);
 				if(c) {
-					/*printk("mptcp_rlc_solve: eliminating %u in pivot for %u\n", (unsigned)l->first, (unsigned)list->first);*/
+					/*printk("mptcp_rlc_solve_rec: eliminating %u in pivot for %u\n", (unsigned)l->first, (unsigned)list->first);*/
 					if(!mptcp_rlc_combination_combine(list, 1, l, c)) {
 						mptcp_rlc_combination_free(incoming);
 						return list;
@@ -851,9 +857,15 @@ EXPORT_SYMBOL(mptcp_rlc_combine_skb);
 void mptcp_rlc_push_skb(struct sock *meta_sk, struct sk_buff *skb)
 {
 	struct mptcp_cb *mpcb = tcp_sk(meta_sk)->mpcb;
-
+	unsigned long flags;
+	
 	BUG_ON(!skb);
+	
+	spin_lock_irqsave(&mpcb->rlc_lock, flags);
+	
 	skb_queue_tail(&mpcb->rlc_queue, skb);
+	
+	spin_unlock_irqrestore(&mpcb->rlc_lock, flags);
 }
 EXPORT_SYMBOL(mptcp_rlc_push_skb);
 
@@ -864,10 +876,13 @@ void mptcp_rlc_solve_pending(struct sock *meta_sk)
 	mptcp_rlc_combination_t *list, *c;
 	uint64_t sequence;
 	struct sk_buff *skb;
-
+	unsigned long flags;
+	
+	spin_lock_irqsave(&mpcb->rlc_lock, flags);
+	
 	list = (mptcp_rlc_combination_t *)mpcb->rlc_ptr;
 
-	if(!skb_queue_empty(&mpcb->rlc_queue))
+	while(!skb_queue_empty(&mpcb->rlc_queue))
 	{
 		skb = skb_dequeue(&mpcb->rlc_queue);
 
@@ -885,6 +900,8 @@ void mptcp_rlc_solve_pending(struct sock *meta_sk)
 
 			/* Remove old combinations */
 			mpcb->rlc_next_dropped = c->first;
+			if(mpcb->rlc_next_dropped > mpcb->rlc_next_decoded)
+				mpcb->rlc_next_dropped = mpcb->rlc_next_decoded;
 			list = mptcp_rlc_update(list, mpcb->rlc_next_dropped);
 
 			/* Solve and update counters */
@@ -905,8 +922,10 @@ void mptcp_rlc_solve_pending(struct sock *meta_sk)
 			/*printk("mptcp_rlc_solve_skb: count=%u, next_seen=%u (acknowledging %u)\n", count, next_seen, mpcb->rlc_next_seen);*/
 		}
 
-		kfree_skb(skb);
+		dev_consume_skb_any(skb);
 	}
+	
+	spin_unlock_irqrestore(&mpcb->rlc_lock, flags);
 }
 EXPORT_SYMBOL(mptcp_rlc_solve_pending);
 
@@ -915,7 +934,10 @@ struct sk_buff *mptcp_rlc_pull_skb(struct sock *meta_sk)
 	struct tcp_sock *tp = tcp_sk(meta_sk);
 	struct mptcp_cb *mpcb = tcp_sk(meta_sk)->mpcb;
 	mptcp_rlc_combination_t *list, *l;
-
+	unsigned long flags;
+	
+	spin_lock_irqsave(&mpcb->rlc_lock, flags);
+	
 	list = (mptcp_rlc_combination_t *)mpcb->rlc_ptr;
 
 	l = list;
@@ -924,7 +946,7 @@ struct sk_buff *mptcp_rlc_pull_skb(struct sock *meta_sk)
 			struct sk_buff *skb;
 			struct tcp_skb_cb *tcb;
 
-			/*printk("mptcp_rlc_solve_skb: next_decoded=%u (decoded size=%u)\n", mpcb->rlc_next_decoded, l->len);*/
+			/*printk("mptcp_rlc_pull_skb: next_decoded=%u (decoded size=%u)\n", mpcb->rlc_next_decoded, l->len);*/
 
 			/* Clone and trim skb */
 			skb = skb_copy(l->skb, GFP_ATOMIC); /* clone ? */
@@ -949,12 +971,14 @@ struct sk_buff *mptcp_rlc_pull_skb(struct sock *meta_sk)
 				mpcb->rlc_next_decoded = l->first + 1;
 			}
 
+			spin_unlock_irqrestore(&mpcb->rlc_lock, flags);
 			return skb;
 		}
 
 		l = l->next;
 	}
 
+	spin_unlock_irqrestore(&mpcb->rlc_lock, flags);
 	return NULL;
 }
 EXPORT_SYMBOL(mptcp_rlc_pull_skb);

@@ -928,7 +928,7 @@ static int mptcp_queue_skb(struct sock *sk)
 					skb = tmp1;
 					if(skb_tailroom(skb) < tp->mptcp->map_data_len - skb->len) {
 						struct sk_buff *newskb = skb_copy_expand(skb, 0, tp->mptcp->map_data_len - skb->len, GFP_ATOMIC);
-						__kfree_skb(skb);
+						dev_kfree_skb_any(skb);
 						skb = newskb;
 						if(!skb) {
 							printk("mptcp_queue_skb: skb_copy_expand() failed, dropping current mapping\n");
@@ -938,10 +938,10 @@ static int mptcp_queue_skb(struct sock *sk)
 				} else {
 					/* Concatenate tmp1 to skb */
 					memcpy(skb_put(skb, tmp1->len), tmp1->data, tmp1->len);
-					__kfree_skb(tmp1);
+					dev_kfree_skb_any(tmp1);
 				}
 			} else {
-				__kfree_skb(tmp1);
+				dev_kfree_skb_any(tmp1);
 			}
 
 			if (!skb_queue_empty(&sk->sk_receive_queue) &&

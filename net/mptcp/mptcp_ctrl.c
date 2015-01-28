@@ -1177,6 +1177,7 @@ static int mptcp_alloc_mpcb(struct sock *meta_sk, __u64 remote_key, u32 window)
 	mpcb->rlc_fin_pending = false;
 	mpcb->rlc_ptr = NULL;
 	skb_queue_head_init(&mpcb->rlc_queue);
+	spin_lock_init(&mpcb->rlc_lock);
 
 	/* The meta is directly linked - set refcnt to 1 */
 	atomic_set(&mpcb->mpcb_refcnt, 1);
