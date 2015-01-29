@@ -1491,6 +1491,10 @@ void mptcp_retransmit_timer(struct sock *meta_sk)
 	    mpcb->send_infinite_mapping)
 		return;
 
+	/* MPTCP-RLC: bypass */
+	if(tcp_sk(meta_sk)->mpcb->rlc_enabled)
+		return;
+	
 	WARN_ON(tcp_write_queue_empty(meta_sk));
 
 	if (!meta_tp->snd_wnd && !sock_flag(meta_sk, SOCK_DEAD) &&
