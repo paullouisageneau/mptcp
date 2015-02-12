@@ -908,14 +908,17 @@ void mptcp_rlc_solve_pending(struct sock *meta_sk)
 			list = mptcp_rlc_solve(list, c, &count, &next_seen);
 
 			/* We do not acknowledge seen packets when decoding buffer is full */
-			if(count <= MPTCP_RLC_MAX_GENERATION) {
+			/*if(count <= MPTCP_RLC_MAX_GENERATION) {
 				mpcb->rlc_next_seen = next_seen;
 			} else {
 				uint32_t r = count - MPTCP_RLC_MAX_GENERATION;
 				if(r > next_seen)
 					r = next_seen;
 				mpcb->rlc_next_seen = next_seen - r;
-			}
+			}*/
+
+			/* TODO */
+			mpcb->rlc_next_seen = next_seen;
 
 			mpcb->rlc_ptr = (void*)list;
 
@@ -945,6 +948,19 @@ struct sk_buff *mptcp_rlc_pull_skb(struct sock *meta_sk)
 		if(l->first == mpcb->rlc_next_decoded && !mptcp_rlc_combination_is_coded(l)) {
 			struct sk_buff *skb;
 			struct tcp_skb_cb *tcb;
+
+			/*static u64 total = 0;
+			static ktime_t tref;
+			s64 us;
+
+			if(!total) tref = ktime_get();
+			total+= l->skb->len;
+			us  = ktime_us_delta(ktime_get(), tref);
+			if(mpcb->rlc_next_decoded % 100 == 0)
+			{
+				unsigned throughput = (unsigned)((total*1000000LL)/us);
+				printk("TK=%u\n", throughput);
+			}*/
 
 			/*printk("mptcp_rlc_pull_skb: next_decoded=%u (decoded size=%u)\n", mpcb->rlc_next_decoded, l->len);*/
 
