@@ -956,7 +956,7 @@ struct sk_buff *mptcp_rlc_pull_skb(struct sock *meta_sk)
 			if(!total) tref = ktime_get();
 			total+= l->skb->len;
 			us  = ktime_us_delta(ktime_get(), tref);
-			if(mpcb->rlc_next_decoded % 100 == 0)
+			if(us > 1000 && mpcb->rlc_next_decoded % 100 == 0)
 			{
 				unsigned throughput = (unsigned)((total*1000000LL)/us);
 				printk("TK=%u\n", throughput);
