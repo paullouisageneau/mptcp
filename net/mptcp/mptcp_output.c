@@ -811,7 +811,8 @@ bool mptcp_write_xmit(struct sock *meta_sk, unsigned int mss_now, int nonagle,
 			skb = NULL;
 		}
 
-		if (push_one)
+		/* MPTCP-RLC */
+		if (!mptcp_is_rlc(skb) && push_one)
 			break;
 
 		/* MPTCP-RLC: Combinations must be freed */

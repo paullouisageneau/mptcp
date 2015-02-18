@@ -16,7 +16,7 @@
 #include <net/mptcp.h>
 
 #define MPTCP_RLC_MAX_COMPONENTS	1024
-#define MPTCP_RLC_MAX_GENERATION	256
+#define MPTCP_RLC_MAX_GENERATION	200
 #define MPTCP_FLAGS_FREE_SKB		0x01
 #define MPTCP_FLAGS_PADDED		0x02
 
@@ -908,17 +908,14 @@ void mptcp_rlc_solve_pending(struct sock *meta_sk)
 			list = mptcp_rlc_solve(list, c, &count, &next_seen);
 
 			/* We do not acknowledge seen packets when decoding buffer is full */
-			/*if(count <= MPTCP_RLC_MAX_GENERATION) {
+			if(count <= MPTCP_RLC_MAX_GENERATION) {
 				mpcb->rlc_next_seen = next_seen;
 			} else {
 				uint32_t r = count - MPTCP_RLC_MAX_GENERATION;
 				if(r > next_seen)
 					r = next_seen;
 				mpcb->rlc_next_seen = next_seen - r;
-			}*/
-
-			/* TODO */
-			mpcb->rlc_next_seen = next_seen;
+			}
 
 			mpcb->rlc_ptr = (void*)list;
 
@@ -944,8 +941,14 @@ struct sk_buff *mptcp_rlc_pull_skb(struct sock *meta_sk)
 	list = (mptcp_rlc_combination_t *)mpcb->rlc_ptr;
 
 	l = list;
-	while(l) {
-		if(l->first == mpcb->rlc_next_decoded && !mptcp_rlc_combination_is_coded(l)) {
+	while(l && !mptcp_rlc_combination_is_coded(l)) {
+
+		if(mpcb->rlc_next_decoded < l->first) {
+			printk("mptcp_rlc_pull_skb: something is wrong, next_decoded=%u, expected %u\n", mpcb->rlc_next_decoded, l->first);
+			mpcb->rlc_next_decoded = l->first;
+		}
+
+		if(l->first == mpcb->rlc_next_decoded) {
 			struct sk_buff *skb;
 			struct tcp_skb_cb *tcb;
 
@@ -962,30 +965,30 @@ struct sk_buff *mptcp_rlc_pull_skb(struct sock *meta_sk)
 				printk("TK=%u\n", throughput);
 			}*/
 
-			/*printk("mptcp_rlc_pull_skb: next_decoded=%u (decoded size=%u)\n", mpcb->rlc_next_decoded, l->len);*/
+			/*printk("mptcp_rlc_pull_skb: next_decoded=%u (decoded size=%u)\n", mpcb->rlc_next_decoded, l->len);i*/
 
 			/* Clone and trim skb */
-			skb = skb_copy(l->skb, GFP_ATOMIC); /* clone ? */
-			if(skb)
-			{
-				skb_trim(skb, l->len);
+			skb = skb_copy(l->skb, sk_gfp_atomic(meta_sk, GFP_ATOMIC)); /* clone ? */
+			if(!skb)
+				break;
+			
+			skb_trim(skb, l->len);
 
-				/* Fill control block */
-				tcb = TCP_SKB_CB(skb);
-				tcb->seq = tp->rcv_nxt;
-				tcb->end_seq = tcb->seq + skb->len;
-				tcb->ack_seq = tp->snd_una - 1;	/* dummy */
-				tcb->tcp_flags = 0;
+			/* Fill control block */
+			tcb = TCP_SKB_CB(skb);
+			tcb->seq = tp->rcv_nxt;
+			tcb->end_seq = tcb->seq + skb->len;
+			tcb->ack_seq = tp->snd_una - 1;	/* dummy */
+			tcb->tcp_flags = 0;
 
-				/* Fin flag handling */
-				if(mpcb->rlc_fin_pending && !l->next) {
-					tcb->tcp_flags|= TCPHDR_FIN;
-					tcb->end_seq+= 1;
-				}
-
-				/* Decoded a new packet */
-				mpcb->rlc_next_decoded = l->first + 1;
+			/* Fin flag handling */
+			if(mpcb->rlc_fin_pending && !l->next) {
+				tcb->tcp_flags|= TCPHDR_FIN;
+				tcb->end_seq+= 1;
 			}
+
+			/* Decoded a new packet */
+			++mpcb->rlc_next_decoded;
 
 			spin_unlock_irqrestore(&mpcb->rlc_lock, flags);
 			return skb;
