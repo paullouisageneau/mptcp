@@ -785,9 +785,6 @@ struct sk_buff *mptcp_rlc_combine_skb(struct sock *meta_sk)
 	uint32_t i;
 	__u32 seq = 0;
 
-	do get_random_bytes(&nonce, sizeof(nonce));
-	while(nonce == 0);
-
 	/* Compute count */
 	count = 0;
         tcp_for_write_queue(skb, meta_sk) {
@@ -806,6 +803,9 @@ struct sk_buff *mptcp_rlc_combine_skb(struct sock *meta_sk)
 	if(!c)
 		return NULL;
 
+	do get_random_bytes(&nonce, sizeof(nonce));
+	while(nonce == 0);
+	
 	/* Compute sequence */
 	c->sequence = ((uint64_t)mpcb->rlc_first_component) + (((uint64_t)count) << 32) + (((uint64_t)nonce) << 48);
 
@@ -829,11 +829,12 @@ struct sk_buff *mptcp_rlc_combine_skb(struct sock *meta_sk)
 
 		mptcp_rlc_combination_free(tmp);
 
-		if(c->count >= count)
-			break;
-
 		if(i == mpcb->rlc_first_component)
 			seq = TCP_SKB_CB(skb)->seq;
+		
+		if(c->count >= count)
+                        break;
+
 		++i;
 	}
 
