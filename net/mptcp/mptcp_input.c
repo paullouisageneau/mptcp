@@ -1520,7 +1520,7 @@ static void mptcp_data_ack(struct sock *sk, const struct sk_buff *skb)
 		data_seq = meta_tp->snd_wl1;
 	}
 
-	/* MPTCP-RLC */
+	/* MPTCP-RLC: TODO */
 	if(mptcp_is_rlc(skb) || true) {
 		struct sk_buff *tmp;
 		u32 next_seen;
@@ -1545,18 +1545,19 @@ static void mptcp_data_ack(struct sock *sk, const struct sk_buff *skb)
 
 		/*printk("mptcp_data_ack: next seen %u, first component %u, ack %u\n", next_seen, meta_tp->mpcb->rlc_first_component, data_ack);*/
 	}
-
-	/* If the ack is older than previous acks
-	 * then we can probably ignore it.
-	 */
-	if (before(data_ack, prior_snd_una))
-		goto exit;
-
-	/* If the ack includes data we haven't sent yet, discard
-	 * this segment (RFC793 Section 3.9).
-	 */
-	if (after(data_ack, meta_tp->snd_nxt))
-		goto exit;
+	else {
+		/* If the ack is older than previous acks
+		 * then we can probably ignore it.
+		 */
+		if (before(data_ack, prior_snd_una))
+			goto exit;
+	
+		/* If the ack includes data we haven't sent yet, discard
+		 * this segment (RFC793 Section 3.9).
+		 */
+		if (after(data_ack, meta_tp->snd_nxt))
+			goto exit;
+	}
 
 	/*** Now, update the window  - inspired by tcp_ack_update_window ***/
 	nwin = ntohs(tcp_hdr(skb)->window);
@@ -1589,8 +1590,10 @@ static void mptcp_data_ack(struct sock *sk, const struct sk_buff *skb)
 	inet_csk(meta_sk)->icsk_probes_out = 0;
 	meta_tp->rcv_tstamp = tcp_time_stamp;
 	prior_packets = meta_tp->packets_out;
-	if (!prior_packets)
-		goto no_queue;
+	
+	/* MPTCP-RLC: TODO */
+	/*if (!prior_packets)
+		goto no_queue;*/
 
 	meta_tp->snd_una = data_ack;
 

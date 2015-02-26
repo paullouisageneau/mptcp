@@ -1174,6 +1174,7 @@ static int mptcp_alloc_mpcb(struct sock *meta_sk, __u64 remote_key, u32 window)
 	mpcb->rlc_next_seen = 0;
 	mpcb->rlc_next_decoded = 0;
 	mpcb->rlc_next_dropped = 0;
+	mpcb->rlc_sent = 0;
 	mpcb->rlc_fin_pending = false;
 	mpcb->rlc_ptr = NULL;
 	skb_queue_head_init(&mpcb->rlc_queue);

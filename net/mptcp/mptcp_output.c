@@ -618,7 +618,7 @@ int mptcp_write_wakeup(struct sock *meta_sk)
 
 		if (!subsk) {
 			/* MPTCP-RLC: Combinations must be freed */
-			if(mptcp_is_rlc(skb))
+			if(tcp_sk(meta_sk)->mpcb->rlc_enabled)
 				dev_kfree_skb_any(skb);
 
 			goto window_probe;
@@ -658,18 +658,20 @@ int mptcp_write_wakeup(struct sock *meta_sk)
 						 TCP_SKB_CB(skb)->seq);
 
 		/* MPTCP-RLC */
-		if(!mptcp_is_rlc(skb))
+		if(!tcp_sk(meta_sk)->mpcb->rlc_enabled)
 			tcp_event_new_data_sent(meta_sk, skb);
-		else
+		else { 
+			tcp_sk(meta_sk)->mpcb->rlc_sent++;
 			dev_kfree_skb_any(skb);
-
+		}
+			
 		__tcp_push_pending_frames(subsk, mss, TCP_NAGLE_PUSH);
 
 		return 0;
 
 failure:
 		/* MPTCP-RLC: Combinations must be freed */
-		if(mptcp_is_rlc(skb))
+		if(tcp_sk(meta_sk)->mpcb->rlc_enabled)
 		        dev_kfree_skb_any(skb);
 
 		return -1;
@@ -758,6 +760,7 @@ bool mptcp_write_xmit(struct sock *meta_sk, unsigned int mss_now, int nonagle,
 					      nonagle : TCP_NAGLE_PUSH))))
 			break;
 
+
 		limit = mss_now;
 		/* skb->len > mss_now is the equivalent of tso_segs > 1 in
 		 * tcp_write_xmit. Otherwise split-point would return 0.
@@ -798,7 +801,7 @@ bool mptcp_write_xmit(struct sock *meta_sk, unsigned int mss_now, int nonagle,
 						TCP_SKB_CB(skb)->seq);
 
 			/* MPTCP-RLC */
-			if(!mptcp_is_rlc(skb))
+			if(!tcp_sk(meta_sk)->mpcb->rlc_enabled)
 				tcp_event_new_data_sent(meta_sk, skb);
 		}
 
@@ -812,16 +815,19 @@ bool mptcp_write_xmit(struct sock *meta_sk, unsigned int mss_now, int nonagle,
 		}
 
 		/* MPTCP-RLC */
-		if (!mptcp_is_rlc(skb) && push_one)
-			break;
-
-		/* MPTCP-RLC: Combinations must be freed */
-		if(skb && mptcp_is_rlc(skb))
+		if (!skb || !tcp_sk(meta_sk)->mpcb->rlc_enabled) {
+			if(push_one)
+				break;
+		}
+		else {
+			tcp_sk(meta_sk)->mpcb->rlc_sent++;
 			dev_kfree_skb_any(skb);
+			skb = NULL;
+		}
 	}
 
 	/* MPTCP-RLC: Combinations must be freed */
-	if(skb && mptcp_is_rlc(skb))
+	if(skb && tcp_sk(meta_sk)->mpcb->rlc_enabled)
 		dev_kfree_skb_any(skb);
 
 	return !meta_tp->packets_out && tcp_send_head(meta_sk);

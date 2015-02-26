@@ -349,6 +349,7 @@ struct mptcp_cb {
 	u32 rlc_next_seen;              /* RX: next seen */
 	u32 rlc_next_decoded;           /* RX: next decoded */
 	u32 rlc_next_dropped;           /* RX: next dropped */
+	u32 rlc_sent;			/* TX: combinations sent */
 	u8  rlc_fin_pending:1;		/* RX: FIN is pending */
         void *rlc_ptr;                  /* RX: RLC state ptr */
         struct sk_buff_head rlc_queue;	/* RX: incoming queue */

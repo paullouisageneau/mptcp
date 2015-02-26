@@ -16,7 +16,7 @@
 #include <net/mptcp.h>
 
 #define MPTCP_RLC_MAX_COMPONENTS	1024
-#define MPTCP_RLC_MAX_GENERATION	200
+#define MPTCP_RLC_MAX_GENERATION	256
 #define MPTCP_FLAGS_FREE_SKB		0x01
 #define MPTCP_FLAGS_PADDED		0x02
 
@@ -798,6 +798,11 @@ struct sk_buff *mptcp_rlc_combine_skb(struct sock *meta_sk)
 	if(count == 0)
 		return NULL;
 
+	/* TODO */
+	/*printk("mptcp_rlc_combine_skb: count=%u, components=%u, sent=%u\n", (unsigned)count, (unsigned)(mpcb->rlc_first_component + count), (unsigned)mpcb->rlc_sent);*/
+	if(mpcb->rlc_sent > (unsigned)((mpcb->rlc_first_component + count)*2.01))
+		return NULL;
+
 	/* Create null combination */
 	c = mptcp_rlc_combination_create_null();
 	if(!c)
@@ -898,7 +903,8 @@ void mptcp_rlc_solve_pending(struct sock *meta_sk)
 		if(c) {
 			uint32_t count = 0;
 			uint32_t next_seen = mpcb->rlc_next_seen;
-
+			uint32_t max = MPTCP_RLC_MAX_GENERATION;
+			
 			/* Remove old combinations */
 			mpcb->rlc_next_dropped = c->first;
 			if(mpcb->rlc_next_dropped > mpcb->rlc_next_decoded)
@@ -909,10 +915,10 @@ void mptcp_rlc_solve_pending(struct sock *meta_sk)
 			list = mptcp_rlc_solve(list, c, &count, &next_seen);
 
 			/* We do not acknowledge seen packets when decoding buffer is full */
-			if(count <= MPTCP_RLC_MAX_GENERATION) {
+			if(count <= max) {
 				mpcb->rlc_next_seen = next_seen;
 			} else {
-				uint32_t r = count - MPTCP_RLC_MAX_GENERATION;
+				uint32_t r = count - max;
 				if(r > next_seen)
 					r = next_seen;
 				mpcb->rlc_next_seen = next_seen - r;
@@ -945,7 +951,7 @@ struct sk_buff *mptcp_rlc_pull_skb(struct sock *meta_sk)
 	while(l && !mptcp_rlc_combination_is_coded(l)) {
 
 		if(mpcb->rlc_next_decoded < l->first) {
-			printk("mptcp_rlc_pull_skb: something is wrong, next_decoded=%u, expected %u\n", mpcb->rlc_next_decoded, l->first);
+			/*printk("mptcp_rlc_pull_skb: something is wrong, next_decoded=%u, expected %u\n", mpcb->rlc_next_decoded, l->first);*/
 			mpcb->rlc_next_decoded = l->first;
 		}
 
@@ -966,7 +972,7 @@ struct sk_buff *mptcp_rlc_pull_skb(struct sock *meta_sk)
 				printk("TK=%u\n", throughput);
 			}*/
 
-			/*printk("mptcp_rlc_pull_skb: next_decoded=%u (decoded size=%u)\n", mpcb->rlc_next_decoded, l->len);i*/
+			/*printk("mptcp_rlc_pull_skb: next_decoded=%u (decoded size=%u)\n", mpcb->rlc_next_decoded, l->len);*/
 
 			/* Clone and trim skb */
 			skb = skb_copy(l->skb, sk_gfp_atomic(meta_sk, GFP_ATOMIC)); /* clone ? */
