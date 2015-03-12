@@ -113,6 +113,10 @@ static void __mptcp_reinject_data(struct sk_buff *orig_skb, struct sock *meta_sk
 	struct mptcp_cb *mpcb = meta_tp->mpcb;
 	u32 seq, end_seq;
 
+	/* IS-MPTCP: Reinjection disabled */
+	if(mpcb->datagram_enabled)
+		return;
+	
 	if (clone_it) {
 		/* pskb_copy is necessary here, because the TCP/IP-headers
 		 * will be changed when it's going to be reinjected on another
@@ -240,6 +244,10 @@ void mptcp_reinject_data(struct sock *sk, int clone_it)
 	struct tcp_sock *tp = tcp_sk(sk);
 	struct sock *meta_sk = tp->meta_sk;
 
+	/* IS-MPTCP: Reinjection disabled */
+	if(tcp_sk(meta_sk)->mpcb->datagram_enabled)
+		return;
+	
 	/* It has already been closed - there is really no point in reinjecting */
 	if (meta_sk->sk_state == TCP_CLOSE)
 		return;
@@ -683,7 +691,7 @@ bool mptcp_write_xmit(struct sock *meta_sk, unsigned int mss_now, int nonagle,
 		if (skb_unclone(skb, GFP_ATOMIC))
 			break;
 
-		if (unlikely(!tcp_snd_wnd_test(meta_tp, skb, mss_now)))
+		if (unlikely(!mpcb->datagram_enabled && !tcp_snd_wnd_test(meta_tp, skb, mss_now)))
 			break;
 
 		/* Force tso_segs to 1 by using UINT_MAX.
@@ -702,7 +710,7 @@ bool mptcp_write_xmit(struct sock *meta_sk, unsigned int mss_now, int nonagle,
 		 * subject to the MPTCP-level. It is based on the properties of
 		 * the subflow, not the MPTCP-level.
 		 */
-		if (unlikely(!tcp_nagle_test(meta_tp, skb, mss_now,
+		if (unlikely(!mpcb->datagram_enabled && !tcp_nagle_test(meta_tp, skb, mss_now,
 					     (tcp_skb_is_last(meta_sk, skb) ?
 					      nonagle : TCP_NAGLE_PUSH))))
 			break;
@@ -754,6 +762,10 @@ bool mptcp_write_xmit(struct sock *meta_sk, unsigned int mss_now, int nonagle,
 		if (reinject > 0) {
 			__skb_unlink(skb, &mpcb->reinject_queue);
 			kfree_skb(skb);
+		}
+		else {
+			//if(mpcb->datagram_enabled)
+			//	tcp_unlink_write_queue(skb, meta_sk);
 		}
 
 		if (push_one)

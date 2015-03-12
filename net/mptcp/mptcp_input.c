@@ -891,85 +891,92 @@ static int mptcp_queue_skb(struct sock *sk)
 		}
 	}
 
-	if (before64(rcv_nxt64, tp->mptcp->map_data_seq)) {
-		/* Seg's have to go to the meta-ofo-queue */
+	/* MPTCP-RLC */
+	if (mpcb->datagram_enabled) {
+		struct sk_buff *skb = NULL;
+	
+		/* Walk the queue */
+		bool ignore = (mpcb->in_time_wait != 0);        /* In time-wait, do not receive data */
 		skb_queue_walk_safe(&sk->sk_receive_queue, tmp1, tmp) {
 			tp->copied_seq = TCP_SKB_CB(tmp1)->end_seq;
 			mptcp_prepare_skb(tmp1, tmp, sk);
 			__skb_unlink(tmp1, &sk->sk_receive_queue);
-			/* MUST be done here, because fragstolen may be true later.
-			 * Then, kfree_skb_partial will not account the memory.
-			 */
 			skb_orphan(tmp1);
 
-			if (!mpcb->in_time_wait) /* In time-wait, do not receive data */
-				mptcp_add_meta_ofo_queue(meta_sk, tmp1, sk);
-			else
+			if (!ignore) {
+				if(!skb) {
+					/* Expand skb if necessary */
+					skb = tmp1;
+					if(skb_tailroom(skb) < tp->mptcp->map_data_len - skb->len) {
+						struct sk_buff *newskb = skb_copy_expand(skb, 0, tp->mptcp->map_data_len - skb->len, GFP_ATOMIC);
+						dev_kfree_skb_any(skb);
+						skb = newskb;
+						if(!skb) {
+							printk("mptcp_queue_skb: skb_copy_expand() failed, dropping current mapping\n");
+							ignore = true;
+						}
+					}
+				} else {
+					/* Concatenate tmp1 to skb */
+					memcpy(skb_put(skb, tmp1->len), tmp1->data, tmp1->len);
+					__kfree_skb(tmp1);
+				}
+			} else {
 				__kfree_skb(tmp1);
+			}
 
 			if (!skb_queue_empty(&sk->sk_receive_queue) &&
-			    !before(TCP_SKB_CB(tmp)->seq,
-				    tp->mptcp->map_subseq + tp->mptcp->map_data_len))
+				!before(TCP_SKB_CB(tmp)->seq,
+					tp->mptcp->map_subseq + tp->mptcp->map_data_len))
 				break;
 		}
-		tcp_enter_quickack_mode(sk);
-	} else {
-		/* Ready for the meta-rcv-queue */
-		skb_queue_walk_safe(&sk->sk_receive_queue, tmp1, tmp) {
+		
+		/* If datagram received */
+		if(skb) {
 			int eaten = 0;
 			const bool copied_early = false;
 			bool fragstolen = false;
 			u32 old_rcv_nxt = meta_tp->rcv_nxt;
-
-			tp->copied_seq = TCP_SKB_CB(tmp1)->end_seq;
-			mptcp_prepare_skb(tmp1, tmp, sk);
-			__skb_unlink(tmp1, &sk->sk_receive_queue);
-			/* MUST be done here, because fragstolen may be true.
-			 * Then, kfree_skb_partial will not account the memory.
-			 */
-			skb_orphan(tmp1);
-
-			/* This segment has already been received */
-			if (!after(TCP_SKB_CB(tmp1)->end_seq, meta_tp->rcv_nxt)) {
-				__kfree_skb(tmp1);
-				goto next;
-			}
-
+			
+			/* Overwrite sequence numbers */
+			TCP_SKB_CB(skb)->seq = meta_tp->rcv_nxt;
+			TCP_SKB_CB(skb)->end_seq = meta_tp->rcv_nxt + skb->len;
+			
 #ifdef CONFIG_NET_DMA
-			if (TCP_SKB_CB(tmp1)->seq == meta_tp->rcv_nxt  &&
-			    meta_tp->ucopy.task == current &&
-			    meta_tp->copied_seq == meta_tp->rcv_nxt &&
-			    tmp1->len <= meta_tp->ucopy.len &&
-			    sock_owned_by_user(meta_sk) &&
-			    tcp_dma_try_early_copy(meta_sk, tmp1, 0)) {
+			if (TCP_SKB_CB(skb)->seq == meta_tp->rcv_nxt  &&
+			meta_tp->ucopy.task == current &&
+			meta_tp->copied_seq == meta_tp->rcv_nxt &&
+			skb->len <= meta_tp->ucopy.len &&
+			sock_owned_by_user(meta_sk) &&
+			tcp_dma_try_early_copy(meta_sk, skb, 0)) {
 				copied_early = true;
 				eaten = 1;
 			}
 #endif
-
+			
 			/* Is direct copy possible ? */
-			if (TCP_SKB_CB(tmp1)->seq == meta_tp->rcv_nxt &&
-			    meta_tp->ucopy.task == current &&
-			    meta_tp->copied_seq == meta_tp->rcv_nxt &&
-			    meta_tp->ucopy.len && sock_owned_by_user(meta_sk) &&
-			    !copied_early)
-				eaten = mptcp_direct_copy(tmp1, meta_sk);
+			if (TCP_SKB_CB(skb)->seq == meta_tp->rcv_nxt &&
+			meta_tp->ucopy.task == current &&
+			meta_tp->copied_seq == meta_tp->rcv_nxt &&
+			meta_tp->ucopy.len && sock_owned_by_user(meta_sk) &&
+			!copied_early)
+				eaten = mptcp_direct_copy(skb, meta_sk);
 
 			if (mpcb->in_time_wait) /* In time-wait, do not receive data */
 				eaten = 1;
 
 			if (!eaten)
-				eaten = tcp_queue_rcv(meta_sk, tmp1, 0, &fragstolen);
+				eaten = tcp_queue_rcv(meta_sk, skb, 0, &fragstolen);
 
-			meta_tp->rcv_nxt = TCP_SKB_CB(tmp1)->end_seq;
+			meta_tp->rcv_nxt = TCP_SKB_CB(skb)->end_seq;
 			mptcp_check_rcvseq_wrap(meta_tp, old_rcv_nxt);
 
 #ifdef CONFIG_NET_DMA
 			if (copied_early)
-				meta_tp->cleanup_rbuf(meta_sk, tmp1->len);
+				meta_tp->cleanup_rbuf(meta_sk, skb->len);
 #endif
 
-			if (tcp_hdr(tmp1)->fin && !mpcb->in_time_wait)
+			if (tcp_hdr(skb)->fin && !mpcb->in_time_wait)
 				mptcp_fin(meta_sk);
 
 			/* Check if this fills a gap in the ofo queue */
@@ -979,21 +986,120 @@ static int mptcp_queue_skb(struct sock *sk)
 #ifdef CONFIG_NET_DMA
 			if (copied_early)
 				__skb_queue_tail(&meta_sk->sk_async_wait_queue,
-						 tmp1);
+						skb);
 			else
 #endif
 			if (eaten)
-				kfree_skb_partial(tmp1, fragstolen);
+				kfree_skb_partial(skb, fragstolen);
 
 			data_queued = true;
-next:
-			if (!skb_queue_empty(&sk->sk_receive_queue) &&
-			    !before(TCP_SKB_CB(tmp)->seq,
-				    tp->mptcp->map_subseq + tp->mptcp->map_data_len))
-				break;
 		}
 	}
+	else {
+		if (before64(rcv_nxt64, tp->mptcp->map_data_seq)) {
+			/* Seg's have to go to the meta-ofo-queue */
+			skb_queue_walk_safe(&sk->sk_receive_queue, tmp1, tmp) {
+				tp->copied_seq = TCP_SKB_CB(tmp1)->end_seq;
+				mptcp_prepare_skb(tmp1, tmp, sk);
+				__skb_unlink(tmp1, &sk->sk_receive_queue);
+				/* MUST be done here, because fragstolen may be true later.
+				* Then, kfree_skb_partial will not account the memory.
+				*/
+				skb_orphan(tmp1);
 
+				if (!mpcb->in_time_wait) /* In time-wait, do not receive data */
+					mptcp_add_meta_ofo_queue(meta_sk, tmp1, sk);
+				else
+					__kfree_skb(tmp1);
+
+				if (!skb_queue_empty(&sk->sk_receive_queue) &&
+				!before(TCP_SKB_CB(tmp)->seq,
+					tp->mptcp->map_subseq + tp->mptcp->map_data_len))
+					break;
+			}
+			tcp_enter_quickack_mode(sk);
+		} else {
+			/* Ready for the meta-rcv-queue */
+			skb_queue_walk_safe(&sk->sk_receive_queue, tmp1, tmp) {
+				int eaten = 0;
+				const bool copied_early = false;
+				bool fragstolen = false;
+				u32 old_rcv_nxt = meta_tp->rcv_nxt;
+
+				tp->copied_seq = TCP_SKB_CB(tmp1)->end_seq;
+				mptcp_prepare_skb(tmp1, tmp, sk);
+				__skb_unlink(tmp1, &sk->sk_receive_queue);
+				/* MUST be done here, because fragstolen may be true.
+				* Then, kfree_skb_partial will not account the memory.
+				*/
+				skb_orphan(tmp1);
+
+				/* This segment has already been received */
+				if (!after(TCP_SKB_CB(tmp1)->end_seq, meta_tp->rcv_nxt)) {
+					__kfree_skb(tmp1);
+					goto next;
+				}
+
+#ifdef CONFIG_NET_DMA
+				if (TCP_SKB_CB(tmp1)->seq == meta_tp->rcv_nxt  &&
+				meta_tp->ucopy.task == current &&
+				meta_tp->copied_seq == meta_tp->rcv_nxt &&
+				tmp1->len <= meta_tp->ucopy.len &&
+				sock_owned_by_user(meta_sk) &&
+				tcp_dma_try_early_copy(meta_sk, tmp1, 0)) {
+					copied_early = true;
+					eaten = 1;
+				}
+#endif
+
+				/* Is direct copy possible ? */
+				if (TCP_SKB_CB(tmp1)->seq == meta_tp->rcv_nxt &&
+				meta_tp->ucopy.task == current &&
+				meta_tp->copied_seq == meta_tp->rcv_nxt &&
+				meta_tp->ucopy.len && sock_owned_by_user(meta_sk) &&
+				!copied_early)
+					eaten = mptcp_direct_copy(tmp1, meta_sk);
+
+				if (mpcb->in_time_wait) /* In time-wait, do not receive data */
+					eaten = 1;
+
+				if (!eaten)
+					eaten = tcp_queue_rcv(meta_sk, tmp1, 0, &fragstolen);
+
+				meta_tp->rcv_nxt = TCP_SKB_CB(tmp1)->end_seq;
+				mptcp_check_rcvseq_wrap(meta_tp, old_rcv_nxt);
+
+#ifdef CONFIG_NET_DMA
+				if (copied_early)
+					meta_tp->cleanup_rbuf(meta_sk, tmp1->len);
+#endif
+
+				if (tcp_hdr(tmp1)->fin && !mpcb->in_time_wait)
+					mptcp_fin(meta_sk);
+
+				/* Check if this fills a gap in the ofo queue */
+				if (!skb_queue_empty(&meta_tp->out_of_order_queue))
+					mptcp_ofo_queue(meta_sk);
+
+#ifdef CONFIG_NET_DMA
+				if (copied_early)
+					__skb_queue_tail(&meta_sk->sk_async_wait_queue,
+							tmp1);
+				else
+#endif
+				if (eaten)
+					kfree_skb_partial(tmp1, fragstolen);
+
+				data_queued = true;
+next:
+				if (!skb_queue_empty(&sk->sk_receive_queue) &&
+				!before(TCP_SKB_CB(tmp)->seq,
+					tp->mptcp->map_subseq + tp->mptcp->map_data_len))
+					break;
+			}
+		}
+	}
+	
 	inet_csk(meta_sk)->icsk_ack.lrcvtime = tcp_time_stamp;
 	mptcp_reset_mapping(tp);
 
