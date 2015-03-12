@@ -1168,9 +1168,6 @@ static int mptcp_alloc_mpcb(struct sock *meta_sk, __u64 remote_key, u32 window)
 	mpcb->orig_sk_sndbuf = meta_sk->sk_sndbuf;
 	mpcb->orig_window_clamp = meta_tp->window_clamp;
 
-	/* IS-MPTCP */
-	mpcb->datagram_enabled = 1;	/* TODO */
-	
 	/* The meta is directly linked - set refcnt to 1 */
 	atomic_set(&mpcb->mpcb_refcnt, 1);
 

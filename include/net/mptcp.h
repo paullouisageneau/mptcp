@@ -174,10 +174,9 @@ struct mptcp_tcp_sock {
 		low_prio:1, /* use this socket as backup */
 		rcv_low_prio:1, /* Peer sent low-prio option to us */
 		send_mp_prio:1, /* Trigger to send mp_prio on this socket */
-		pre_established:1, /* State between sending 3rd ACK and
+		pre_established:1; /* State between sending 3rd ACK and
 				    * receiving the fourth ack of new subflows.
 				    */
-		mapping_datagram:1;
 
 	/* isn: needed to translate abs to relative subflow seqnums */
 	u32	snt_isn;
@@ -337,9 +336,6 @@ struct mptcp_cb {
 	int orig_sk_sndbuf;
 	u32 orig_window_clamp;
 
-	/* IS-MPTCP */
-	u8 datagram_enabled;
-	
 	/* Timer for retransmitting SYN/ACK+MP_JOIN */
 	struct timer_list synack_timer;
 };
