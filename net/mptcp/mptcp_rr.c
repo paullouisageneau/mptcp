@@ -25,6 +25,7 @@ static bool mptcp_rr_is_available(struct sock *sk, struct sk_buff *skb,
 				  bool zero_wnd_test, bool cwnd_test)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
+	struct tcp_skb_cb *tcb = TCP_SKB_CB(skb);
 	unsigned int space, in_flight;
 
 	/* Set of states for which we are allowed to send data */
@@ -55,14 +56,27 @@ static bool mptcp_rr_is_available(struct sock *sk, struct sk_buff *skb,
 			return false;
 	}
 
-	/* MPTCP-RLC: ignore in-order test */
-	if (!tp->mptcp->fully_established && !tp->mpcb->rlc_enabled) {
-		/* Make sure that we send in-order data */
-		if (skb && tp->mptcp->second_packet &&
-		    tp->mptcp->last_end_data_seq != TCP_SKB_CB(skb)->seq)
+	/* MPTCP-RLC */
+	if(!tp->mpcb->rlc_enabled) {
+		if (!tp->mptcp->fully_established) {
+                	/* Make sure that we send in-order data */
+                	if (skb && tp->mptcp->second_packet &&
+                    		tp->mptcp->last_end_data_seq != TCP_SKB_CB(skb)->seq)
+                        	return false;
+        	}
+	}
+	else {
+		/* Ignore in-order test, do redundancy control instead */
+		uint32_t first = (uint32_t)tcb->mptcp_rlc_seq;
+        	uint16_t count = (uint16_t)(tcb->mptcp_rlc_seq >> 32);
+		double factor = 1.1;
+		
+		printk("mptcp_rlc_combine_skb: count=%u, components=%u, sent=%u\n", (unsigned)count, (unsigned)(first + count), (unsigned)tcp_sk(sk)->mptcp_rlc_sent);
+
+		if(tcp_sk(sk)->mptcp_rlc_sent > (unsigned int)(factor*(first + count)))
 			return false;
 	}
-
+	
 	if (!cwnd_test)
 		goto zero_wnd_test;
 

@@ -616,13 +616,8 @@ int mptcp_write_wakeup(struct sock *meta_sk)
 		struct sock *subsk = meta_tp->mpcb->sched_ops->get_subflow(meta_sk, skb, true);
 		struct tcp_sock *subtp;
 
-		if (!subsk) {
-			/* MPTCP-RLC: Combinations must be freed */
-			if(tcp_sk(meta_sk)->mpcb->rlc_enabled)
-				dev_kfree_skb_any(skb);
-
+		if (!subsk)
 			goto window_probe;
-		}
 
 		subtp = tcp_sk(subsk);
 		mss = tcp_current_mss(subsk);
@@ -660,8 +655,10 @@ int mptcp_write_wakeup(struct sock *meta_sk)
 		/* MPTCP-RLC */
 		if(!tcp_sk(meta_sk)->mpcb->rlc_enabled)
 			tcp_event_new_data_sent(meta_sk, skb);
-		else { 
-			tcp_sk(meta_sk)->mpcb->rlc_sent++;
+		else {
+			printk("mptcp_rlc_sent: %u\n", tcp_sk(subsk)->mptcp_rlc_sent);
+			subtp->mptcp_rlc_sent++;
+			meta_tp->mpcb->rlc_sent++;
 			dev_kfree_skb_any(skb);
 		}
 			
@@ -677,6 +674,10 @@ failure:
 		return -1;
 	} else {
 window_probe:
+		/* MPTCP-RLC: Combinations must be freed */
+		if(skb && tcp_sk(meta_sk)->mpcb->rlc_enabled)
+                	dev_kfree_skb_any(skb);
+
 		if (between(meta_tp->snd_up, meta_tp->snd_una + 1,
 			    meta_tp->snd_una + 0xFFFF)) {
 			mptcp_for_each_sk(meta_tp->mpcb, sk_it) {
@@ -820,7 +821,8 @@ bool mptcp_write_xmit(struct sock *meta_sk, unsigned int mss_now, int nonagle,
 				break;
 		}
 		else {
-			tcp_sk(meta_sk)->mpcb->rlc_sent++;
+			subtp->mptcp_rlc_sent++;
+			meta_tp->mpcb->rlc_sent++;
 			dev_kfree_skb_any(skb);
 			skb = NULL;
 		}

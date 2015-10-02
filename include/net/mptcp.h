@@ -460,6 +460,9 @@ static inline void mptcp_init_tcp_sock(struct tcp_sock *tp)
 {
 	reset_mpc(tp);
 	reset_meta_funcs(tp);
+
+	/* MPTCP-RLC */
+	tp->mptcp_rlc_sent = 0;
 }
 
 #ifdef CONFIG_MPTCP

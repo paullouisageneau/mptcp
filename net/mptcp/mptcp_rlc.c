@@ -725,7 +725,7 @@ mptcp_rlc_combination_t *mptcp_rlc_solve(mptcp_rlc_combination_t *list, mptcp_rl
 		p = l;
 		l = l->next;
 	}
-
+	
 	return list;
 }
 
@@ -798,10 +798,7 @@ struct sk_buff *mptcp_rlc_combine_skb(struct sock *meta_sk)
 	if(count == 0)
 		return NULL;
 
-	/* TODO */
 	/*printk("mptcp_rlc_combine_skb: count=%u, components=%u, sent=%u\n", (unsigned)count, (unsigned)(mpcb->rlc_first_component + count), (unsigned)mpcb->rlc_sent);*/
-	if(mpcb->rlc_sent > (unsigned)((mpcb->rlc_first_component + count)*2.01))
-		return NULL;
 
 	/* Create null combination */
 	c = mptcp_rlc_combination_create_null();
@@ -887,7 +884,7 @@ void mptcp_rlc_solve_pending(struct sock *meta_sk)
 	spin_lock_irqsave(&mpcb->rlc_lock, flags);
 	
 	list = (mptcp_rlc_combination_t *)mpcb->rlc_ptr;
-
+	
 	while(!skb_queue_empty(&mpcb->rlc_queue))
 	{
 		skb = skb_dequeue(&mpcb->rlc_queue);
@@ -959,7 +956,8 @@ struct sk_buff *mptcp_rlc_pull_skb(struct sock *meta_sk)
 			struct sk_buff *skb;
 			struct tcp_skb_cb *tcb;
 
-			/*static u64 total = 0;
+/*
+			static u64 total = 0;
 			static ktime_t tref;
 			s64 us;
 
@@ -970,7 +968,8 @@ struct sk_buff *mptcp_rlc_pull_skb(struct sock *meta_sk)
 			{
 				unsigned throughput = (unsigned)((total*1000000LL)/us);
 				printk("TK=%u\n", throughput);
-			}*/
+			}
+*/
 
 			/*printk("mptcp_rlc_pull_skb: next_decoded=%u (decoded size=%u)\n", mpcb->rlc_next_decoded, l->len);*/
 

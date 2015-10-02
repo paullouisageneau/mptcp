@@ -397,6 +397,10 @@ struct tcp_sock {
 	struct hlist_nulls_node tk_table;
 	u32		mptcp_loc_token;
 	u64		mptcp_loc_key;
+
+	/* MPTCP-RLC */
+	u32		mptcp_rlc_sent;
+
 #endif /* CONFIG_MPTCP */
 
 	/* Functions that depend on the value of the mpc flag */
