@@ -986,8 +986,6 @@ struct sk_buff *mptcp_rlc_pull_skb(struct sock *meta_sk)
 			
 			skb_trim(skb, l->len);
 
-			printk("skb->len=%u\n", skb->len);
-
 			/* Fill control block */
 			tcb = TCP_SKB_CB(skb);
 			tcb->seq = tp->rcv_nxt;
