@@ -226,8 +226,9 @@ int mptcp_rlc_combination_clean_padding(mptcp_rlc_combination_t *combination)
 
 			if(last > 0) 
 			{
-				if(combination->skb->data[last] == 0x80) --last;
-				else printk(KERN_NOTICE "MPTCP-RLC: Invalid padding in decoded buffer\n");
+				if(combination->skb->data[last] != 0x80)
+					printk(KERN_NOTICE "MPTCP-RLC: Invalid padding in decoded buffer\n");
+				--last;
 			}
 
 			combination->flags&= ~MPTCP_FLAGS_PADDED;
@@ -984,6 +985,8 @@ struct sk_buff *mptcp_rlc_pull_skb(struct sock *meta_sk)
 				break;
 			
 			skb_trim(skb, l->len);
+
+			printk("skb->len=%u\n", skb->len);
 
 			/* Fill control block */
 			tcb = TCP_SKB_CB(skb);
