@@ -1758,6 +1758,7 @@ int tcp_recvmsg(struct kiocb *iocb, struct sock *sk, struct msghdr *msg,
 		/* Next get a buffer. */
 
 		skb_queue_walk(&sk->sk_receive_queue, skb) {
+			
 			/* Now that we have two receive queues this
 			 * shouldn't happen.
 			 */

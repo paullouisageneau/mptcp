@@ -66,14 +66,12 @@ static bool mptcp_rr_is_available(struct sock *sk, struct sk_buff *skb,
         	}
 	}
 	else {
-		/* Ignore in-order test, do redundancy control instead */
+		/* MPTCP-RLC: Ignore in-order test, do redundancy control instead */
 		uint32_t first = (uint32_t)tcb->mptcp_rlc_seq;
         	uint16_t count = (uint16_t)(tcb->mptcp_rlc_seq >> 32);
 		double factor = 1.1;
-		
-		printk("mptcp_rlc_combine_skb: count=%u, components=%u, sent=%u\n", (unsigned)count, (unsigned)(first + count), (unsigned)tcp_sk(sk)->mptcp_rlc_sent);
 
-		if(tcp_sk(sk)->mptcp_rlc_sent > (unsigned int)(factor*(first + count)))
+		if(tcp_sk(sk)->mptcp_rlc_sent > (unsigned int)(factor*(first + count))+1)
 			return false;
 	}
 	

@@ -15,18 +15,18 @@
 #include <net/tcp.h>
 #include <net/mptcp.h>
 
-#define MPTCP_RLC_MAX_COMPONENTS	1024
+#define MPTCP_RLC_MAX_COMPONENTS	4096
 #define MPTCP_RLC_MAX_GENERATION	256
 #define MPTCP_FLAGS_FREE_SKB		0x01
 #define MPTCP_FLAGS_PADDED		0x02
 
 typedef struct mptcp_rlc_combination {
 	struct mptcp_rlc_combination *next;
-	uint64_t sequence;
+	struct sk_buff *skb;                            /* buffer */
+	uint64_t sequence;				/* sequence identifier */
 	uint32_t first;					/* first component number */
 	uint16_t count;					/* number of components */
 	uint16_t len;					/* real data length */
-	struct sk_buff *skb;				/* buffer */
 	uint8_t flags;					/* flags */
 	uint8_t coeffs[MPTCP_RLC_MAX_COMPONENTS];	/* coefficients */
 
@@ -224,12 +224,14 @@ int mptcp_rlc_combination_clean_padding(mptcp_rlc_combination_t *combination)
 			while(last > 0 && combination->skb->data[last] == 0x00)
 				--last;
 
-			/* TODO */
-			/*if(last > 0 && combination->skb->data[last] != 0x80)
-				printk(KERN_NOTICE "MPTCP-RLC: Invalid padding in decoded buffer\n");*/
+			if(last > 0) 
+			{
+				if(combination->skb->data[last] == 0x80) --last;
+				else printk(KERN_NOTICE "MPTCP-RLC: Invalid padding in decoded buffer\n");
+			}
 
 			combination->flags&= ~MPTCP_FLAGS_PADDED;
-			combination->len = last + 1;
+			combination->len = last+1;
 			skb_trim(combination->skb, combination->len);
 		}
 	}
@@ -534,6 +536,8 @@ mptcp_rlc_combination_t *mptcp_rlc_update(mptcp_rlc_combination_t *list, uint32_
 {
 	mptcp_rlc_combination_t *tmp, *l, *p;
 
+	//printk("mptcp_rlc_update: next_dropped=%u\n", next_dropped);
+
 	/* Drop deprecated equations */
 	l = list;
 	p = NULL;
@@ -564,6 +568,8 @@ mptcp_rlc_combination_t *mptcp_rlc_solve_rec(mptcp_rlc_combination_t *list, mptc
 	if(!incoming || incoming == list)
 		return list;
 
+	BUG_ON(incoming->next != NULL);
+
 	if(!list) {
 		mptcp_rlc_combination_clean(incoming);
 
@@ -572,8 +578,6 @@ mptcp_rlc_combination_t *mptcp_rlc_solve_rec(mptcp_rlc_combination_t *list, mptc
 			/* Normalize and add to the system */
 			uint8_t c = mptcp_rlc_combination_coeff(incoming, incoming->first);
 			mptcp_rlc_combination_div(incoming, c);
-
-			BUG_ON(incoming->next != NULL);
 
 			/*printk("mptcp_rlc_solve_rec: inserting incoming at end (position %u), new pivot for %u\n", i, (unsigned)incoming->first);*/
 			return incoming;
@@ -621,8 +625,6 @@ mptcp_rlc_combination_t *mptcp_rlc_solve_rec(mptcp_rlc_combination_t *list, mptc
 				}
 
 				mptcp_rlc_combination_clean(incoming);
-
-				BUG_ON(incoming->next != NULL);
 				incoming->next = list;
 
 				/*printk("mptcp_rlc_solve_rec: inserting incoming at position %u, new pivot for %u\n", (unsigned)i, (unsigned)i);*/
@@ -900,7 +902,6 @@ void mptcp_rlc_solve_pending(struct sock *meta_sk)
 		if(c) {
 			uint32_t count = 0;
 			uint32_t next_seen = mpcb->rlc_next_seen;
-			uint32_t max = MPTCP_RLC_MAX_GENERATION;
 			
 			/* Remove old combinations */
 			mpcb->rlc_next_dropped = c->first;
@@ -912,14 +913,18 @@ void mptcp_rlc_solve_pending(struct sock *meta_sk)
 			list = mptcp_rlc_solve(list, c, &count, &next_seen);
 
 			/* We do not acknowledge seen packets when decoding buffer is full */
-			if(count <= max) {
+			/* TODO: disabled */
+			/*if(count <= MPTCP_RLC_MAX_GENERATION) {
 				mpcb->rlc_next_seen = next_seen;
 			} else {
-				uint32_t r = count - max;
+				uint32_t r = count - MPTCP_RLC_MAX_GENERATION;
 				if(r > next_seen)
 					r = next_seen;
 				mpcb->rlc_next_seen = next_seen - r;
-			}
+			}*/
+
+			/* Instead, use a linear term */
+			mpcb->rlc_next_seen = next_seen - count/MPTCP_RLC_MAX_GENERATION;
 
 			mpcb->rlc_ptr = (void*)list;
 
@@ -987,10 +992,15 @@ struct sk_buff *mptcp_rlc_pull_skb(struct sock *meta_sk)
 			tcb->ack_seq = tp->snd_una - 1;	/* dummy */
 			tcb->tcp_flags = 0;
 
+			// Fill header
+			tcp_hdr(skb)->syn = 0;
+			tcp_hdr(skb)->fin = 0;
+
 			/* Fin flag handling */
 			if(mpcb->rlc_fin_pending && !l->next) {
 				tcb->tcp_flags|= TCPHDR_FIN;
 				tcb->end_seq+= 1;
+				tcp_hdr(skb)->fin = 1;
 			}
 
 			/* Decoded a new packet */
