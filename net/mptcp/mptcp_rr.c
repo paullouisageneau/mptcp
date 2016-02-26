@@ -25,7 +25,6 @@ static bool mptcp_rr_is_available(struct sock *sk, struct sk_buff *skb,
 				  bool zero_wnd_test, bool cwnd_test)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
-	struct tcp_skb_cb *tcb = TCP_SKB_CB(skb);
 	unsigned int space, in_flight;
 
 	/* Set of states for which we are allowed to send data */
@@ -67,12 +66,16 @@ static bool mptcp_rr_is_available(struct sock *sk, struct sk_buff *skb,
 	}
 	else {
 		/* MPTCP-RLC: Ignore in-order test, do redundancy control instead */
+		/*struct tcp_skb_cb *tcb = TCP_SKB_CB(skb);
 		uint32_t first = (uint32_t)tcb->mptcp_rlc_seq;
-        	uint16_t count = (uint16_t)(tcb->mptcp_rlc_seq >> 32);
-		double factor = 1.1;
+        	uint32_t count = (uint16_t)(tcb->mptcp_rlc_seq >> 32);
+		uint32_t d = (tp->mpcb->cnt_established >= 2 ? tp->mpcb->cnt_established-1 : 1); 	
+		
+		uint32_t factor = 1100;
+		uint32_t max = ((first + count)*factor)/(d*1000) + 1;
 
-		if(tcp_sk(sk)->mptcp_rlc_sent > (unsigned int)(factor*(first + count))+1)
-			return false;
+		if(tcp_sk(sk)->mptcp_rlc_sent > max)
+			return false;*/
 	}
 	
 	if (!cwnd_test)

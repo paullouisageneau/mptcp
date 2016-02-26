@@ -41,7 +41,7 @@ uint8_t mptcp_rlc_generate(uint64_t *seed)
 
 	do {
 		/* Knuth's 64-bit linear congruential generator */
-		*seed = (uint64_t)(*seed*6364136223846793005 + 1442695040888963407);
+		*seed = (uint64_t)(*seed*6364136223846793005LL + 1442695040888963407LL);
 		value = (uint8_t)(*seed >> 56);
 	} while(!value);
 
@@ -226,8 +226,8 @@ int mptcp_rlc_combination_clean_padding(mptcp_rlc_combination_t *combination)
 
 			if(last > 0) 
 			{
-				if(combination->skb->data[last] != 0x80)
-					printk(KERN_NOTICE "MPTCP-RLC: Invalid padding in decoded buffer\n");
+				/*if(combination->skb->data[last] != 0x80)
+					printk(KERN_NOTICE "MPTCP-RLC: Invalid padding in decoded buffer\n");*/
 				--last;
 			}
 
@@ -537,7 +537,7 @@ mptcp_rlc_combination_t *mptcp_rlc_update(mptcp_rlc_combination_t *list, uint32_
 {
 	mptcp_rlc_combination_t *tmp, *l, *p;
 
-	//printk("mptcp_rlc_update: next_dropped=%u\n", next_dropped);
+	/*printk("mptcp_rlc_update: next_dropped=%u\n", next_dropped);*/
 
 	/* Drop deprecated equations */
 	l = list;
@@ -566,6 +566,9 @@ mptcp_rlc_combination_t *mptcp_rlc_update(mptcp_rlc_combination_t *list, uint32_
 /* Recursive Gauss-Jordan elimination */
 mptcp_rlc_combination_t *mptcp_rlc_solve_rec(mptcp_rlc_combination_t *list, mptcp_rlc_combination_t *incoming, unsigned i)
 {
+	static unsigned total = 0;
+        static unsigned redundant = 0;
+
 	if(!incoming || incoming == list)
 		return list;
 
@@ -580,6 +583,8 @@ mptcp_rlc_combination_t *mptcp_rlc_solve_rec(mptcp_rlc_combination_t *list, mptc
 			uint8_t c = mptcp_rlc_combination_coeff(incoming, incoming->first);
 			mptcp_rlc_combination_div(incoming, c);
 
+			++total;
+
 			/*printk("mptcp_rlc_solve_rec: inserting incoming at end (position %u), new pivot for %u\n", i, (unsigned)incoming->first);*/
 			return incoming;
 		}
@@ -587,7 +592,9 @@ mptcp_rlc_combination_t *mptcp_rlc_solve_rec(mptcp_rlc_combination_t *list, mptc
 			/* Combination is now null, meaning it was redundant */
 			mptcp_rlc_combination_free(incoming);
 
-			/*printk("mptcp_rlc_solve_rec: incoming is redundant\n");*/
+			++redundant;
+			++total;
+			printk("mptcp_rlc_solve_rec: incoming is redundant (%u over %u, ratio=%u%%)\n", redundant, total, (redundant*100)/total);
 			return NULL;
 		}
 	}
@@ -796,7 +803,7 @@ struct sk_buff *mptcp_rlc_combine_skb(struct sock *meta_sk)
 			break;
         }
 
-        /*printk("mptcp_rlc_combine_skb: generation size: %u\n", count);*/
+        /*printk("mptcp_rlc_combine_skb: count=%u\n", count);*/
 
 	if(count == 0)
 		return NULL;
@@ -868,7 +875,7 @@ void mptcp_rlc_push_skb(struct sock *meta_sk, struct sk_buff *skb)
 	BUG_ON(!skb);
 	
 	spin_lock_irqsave(&mpcb->rlc_lock, flags);
-	
+
 	skb_queue_tail(&mpcb->rlc_queue, skb);
 	
 	spin_unlock_irqrestore(&mpcb->rlc_lock, flags);
@@ -903,33 +910,29 @@ void mptcp_rlc_solve_pending(struct sock *meta_sk)
 		if(c) {
 			uint32_t count = 0;
 			uint32_t next_seen = mpcb->rlc_next_seen;
-			
-			/* Remove old combinations */
-			mpcb->rlc_next_dropped = c->first;
-			if(mpcb->rlc_next_dropped > mpcb->rlc_next_decoded)
-				mpcb->rlc_next_dropped = mpcb->rlc_next_decoded;
-			list = mptcp_rlc_update(list, mpcb->rlc_next_dropped);
 
-			/* Solve and update counters */
-			list = mptcp_rlc_solve(list, c, &count, &next_seen);
+			if(c->first >= mpcb->rlc_next_dropped)
+			{
+				/* Remove old combinations */
+				mpcb->rlc_next_dropped = c->first;
+				if(mpcb->rlc_next_dropped > mpcb->rlc_next_decoded)
+					mpcb->rlc_next_dropped = mpcb->rlc_next_decoded;
+				list = mptcp_rlc_update(list, mpcb->rlc_next_dropped);
+	
+				/* Solve and update counters */
+				list = mptcp_rlc_solve(list, c, &count, &next_seen);
+	
+				/*printk("mptcp_rlc_solve_pending: count=%u\n", count);*/
 
-			/* We do not acknowledge seen packets when decoding buffer is full */
-			/* TODO: disabled */
-			/*if(count <= MPTCP_RLC_MAX_GENERATION) {
+				/* Do not report next seen if decoding buffer is full */
+				if(count >= MPTCP_RLC_MAX_GENERATION)
+					next_seen-= count - MPTCP_RLC_MAX_GENERATION + 1;
+	
 				mpcb->rlc_next_seen = next_seen;
-			} else {
-				uint32_t r = count - MPTCP_RLC_MAX_GENERATION;
-				if(r > next_seen)
-					r = next_seen;
-				mpcb->rlc_next_seen = next_seen - r;
-			}*/
-
-			/* Instead, use a linear term */
-			mpcb->rlc_next_seen = next_seen - count/MPTCP_RLC_MAX_GENERATION;
-
-			mpcb->rlc_ptr = (void*)list;
-
-			/*printk("mptcp_rlc_solve_skb: count=%u, next_seen=%u (acknowledging %u)\n", count, next_seen, mpcb->rlc_next_seen);*/
+				mpcb->rlc_ptr = (void*)list;
+	
+				/*printk("mptcp_rlc_solve_pending: count=%u, next_seen=%u (acknowledging %u)\n", count, next_seen, mpcb->rlc_next_seen);*/
+			}
 		}
 
 		dev_consume_skb_any(skb);
@@ -993,7 +996,7 @@ struct sk_buff *mptcp_rlc_pull_skb(struct sock *meta_sk)
 			tcb->ack_seq = tp->snd_una - 1;	/* dummy */
 			tcb->tcp_flags = 0;
 
-			// Fill header
+			/* Fill header */
 			tcp_hdr(skb)->syn = 0;
 			tcp_hdr(skb)->fin = 0;
 

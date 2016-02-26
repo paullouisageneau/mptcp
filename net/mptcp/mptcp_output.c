@@ -656,7 +656,6 @@ int mptcp_write_wakeup(struct sock *meta_sk)
 		if(!tcp_sk(meta_sk)->mpcb->rlc_enabled)
 			tcp_event_new_data_sent(meta_sk, skb);
 		else {
-			printk("mptcp_rlc_sent: %u\n", tcp_sk(subsk)->mptcp_rlc_sent);
 			subtp->mptcp_rlc_sent++;
 			meta_tp->mpcb->rlc_sent++;
 			dev_kfree_skb_any(skb);
